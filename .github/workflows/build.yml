@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.8.0
+          mod_version=2.9.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -437,6 +437,7 @@ jobs:
           import com.adamarmanyos.stronghold.calc.StrongholdPrediction;
 
           import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.options.GameOptions;
           import net.minecraft.client.gui.DrawableHelper;
           import net.minecraft.client.network.ClientPlayerEntity;
           import net.minecraft.client.util.InputUtil;
@@ -466,6 +467,20 @@ jobs:
               private static final int KEY_CAPTURE = GLFW.GLFW_KEY_C;
               private static final int KEY_TOGGLE = GLFW.GLFW_KEY_N;
               private static final int KEY_SETTINGS = GLFW.GLFW_KEY_PERIOD;
+              private static final int KEY_MEASURE_MODE = GLFW.GLFW_KEY_M;
+
+              // Measuring view: narrow FOV and the slowest mouse, so a pixel of movement
+              // covers the least angle and the crosshair can be put exactly on the eye.
+              // This is the legal substitute for a zoom mod - both are vanilla settings.
+              private static final double MEASURE_FOV = 30.0D;
+              private static final double MEASURE_SENSITIVITY = 0.0D;
+
+              // Running view: Quake Pro and a fast mouse.
+              private static final double TRAVEL_FOV = 110.0D;
+              private static final double TRAVEL_SENSITIVITY = 0.8D;
+
+              /** FOV below this counts as already being in measuring view. */
+              private static final double MEASURE_FOV_THRESHOLD = 70.0D;
               private static final int KEY_RESET = GLFW.GLFW_KEY_B;
               private static final int KEY_FADE = GLFW.GLFW_KEY_LEFT_BRACKET;
               private static final int KEY_BRIGHTEN = GLFW.GLFW_KEY_RIGHT_BRACKET;
@@ -538,7 +553,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v2.8.0";
+              private static final String VERSION = "v2.9.0";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
@@ -555,6 +570,7 @@ jobs:
               private static boolean prevCapture;
               private static boolean prevToggle;
               private static boolean prevSettings;
+              private static boolean prevMeasureMode;
               private static boolean prevReset;
               private static boolean prevFade;
               private static boolean prevBrighten;
@@ -608,6 +624,7 @@ jobs:
                       prevCapture = false;
                       prevToggle = false;
                       prevSettings = false;
+                      prevMeasureMode = false;
                       prevReset = false;
                       prevFade = false;
                       prevBrighten = false;
@@ -622,6 +639,7 @@ jobs:
                   boolean capture = modifier && InputUtil.isKeyPressed(window, KEY_CAPTURE);
                   boolean toggle = !modifier && InputUtil.isKeyPressed(window, KEY_TOGGLE);
                   boolean settings = !modifier && InputUtil.isKeyPressed(window, KEY_SETTINGS);
+                  boolean measureMode = !modifier && InputUtil.isKeyPressed(window, KEY_MEASURE_MODE);
                   boolean reset = !modifier && InputUtil.isKeyPressed(window, KEY_RESET);
                   boolean fade = !modifier && InputUtil.isKeyPressed(window, KEY_FADE);
                   boolean brighten = !modifier && InputUtil.isKeyPressed(window, KEY_BRIGHTEN);
@@ -639,6 +657,9 @@ jobs:
                   }
                   if (settings && !prevSettings) {
                       client.openScreen(new StrongholdSettingsScreen());
+                  }
+                  if (measureMode && !prevMeasureMode) {
+                      toggleMeasureMode(client);
                   }
                   if (reset && !prevReset) {
                       reset();
@@ -660,11 +681,46 @@ jobs:
                   prevCapture = capture;
                   prevToggle = toggle;
                   prevSettings = settings;
+                  prevMeasureMode = measureMode;
                   prevReset = reset;
                   prevFade = fade;
                   prevBrighten = brighten;
                   prevSmaller = smaller;
                   prevLarger = larger;
+              }
+
+              /**
+               * Swaps between a measuring view and a running view.
+               *
+               * Zoom mods are not legal for leaderboard runs, but FOV and mouse
+               * sensitivity are ordinary vanilla settings. Dropping to FOV 30 with the
+               * slowest mouse makes each pixel of movement cover a much smaller angle,
+               * which is the whole benefit a zoom would have given while measuring.
+               *
+               * Which way it swaps is decided by the current FOV rather than a remembered
+               * flag, so changing FOV through the options menu cannot leave the toggle
+               * out of step with what is on screen.
+               */
+              private static void toggleMeasureMode(MinecraftClient client) {
+                  GameOptions options = client.options;
+                  if (options == null) {
+                      return;
+                  }
+
+                  boolean measuring = options.fov <= MEASURE_FOV_THRESHOLD;
+
+                  if (measuring) {
+                      options.fov = TRAVEL_FOV;
+                      options.mouseSensitivity = TRAVEL_SENSITIVITY;
+                      showNotice("Travel: FOV 110, sens 80%");
+                  } else {
+                      options.fov = MEASURE_FOV;
+                      options.mouseSensitivity = MEASURE_SENSITIVITY;
+                      showNotice("Measure: FOV 30, sens 0%");
+                  }
+
+                  // Persist, so the setting survives a restart like any options change.
+                  options.write();
               }
 
               // ----------------------------------------------------------------- state
