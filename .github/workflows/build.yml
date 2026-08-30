@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.7.1
+          mod_version=2.7.2
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -475,7 +475,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v2.7.1";
+              private static final String VERSION = "v2.7.2";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
@@ -1590,9 +1590,15 @@ jobs:
                       return Result.failure("No stronghold fits those angles");
                   }
 
-                  double crossing = crossingAngle(
-                      measurements.get(measurements.size() - 2),
-                      measurements.get(measurements.size() - 1));
+                  // Only meaningful with two or more sight lines. With a single throw
+                  // there is no crossing, and asking for measurement (size - 2) would
+                  // index -1.
+                  double crossing = 0.0D;
+                  if (measurements.size() >= 2) {
+                      crossing = crossingAngle(
+                          measurements.get(measurements.size() - 2),
+                          measurements.get(measurements.size() - 1));
+                  }
 
                   List<StrongholdPrediction> candidates = new ArrayList<StrongholdPrediction>();
 
