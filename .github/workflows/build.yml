@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.2.0
+          mod_version=2.3.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -98,6 +98,154 @@ jobs:
           }
 
           rootProject.name = 'stronghold-finder'
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/StrongholdConfig.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import java.io.BufferedReader;
+          import java.io.BufferedWriter;
+          import java.io.IOException;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+
+          import net.fabricmc.loader.api.FabricLoader;
+
+          /**
+           * Tiny persisted config. Currently just HUD opacity.
+           *
+           * FabricLoader supplies the config directory, so this needs no Fabric API. The
+           * file is a single "key=value" line per setting, written only when a value
+           * actually changes.
+           */
+          public final class StrongholdConfig {
+
+              private static final String FILE_NAME = "strongholdfinder.properties";
+
+              /**
+               * Minecraft's text renderer treats a colour with an alpha byte below 4 as
+               * "no alpha given" and forces it fully opaque, so opacity can never go all
+               * the way to invisible. 10% maps to alpha 26, comfortably above that.
+               */
+              public static final int MIN_OPACITY = 10;
+              public static final int MAX_OPACITY = 100;
+              public static final int OPACITY_STEP = 10;
+
+              private static int opacityPercent = 100;
+              private static boolean loaded;
+
+              private StrongholdConfig() {
+              }
+
+              public static int opacityPercent() {
+                  ensureLoaded();
+                  return opacityPercent;
+              }
+
+              /** Alpha byte for the current opacity, ready to OR into an RGB colour. */
+              public static int alphaBits() {
+                  int alpha = (int) Math.round((opacityPercent() / 100.0D) * 255.0D);
+                  if (alpha < 26) {
+                      alpha = 26;
+                  }
+                  if (alpha > 255) {
+                      alpha = 255;
+                  }
+                  return alpha << 24;
+              }
+
+              /** Applies the current opacity to a 0xRRGGBB colour. */
+              public static int applyOpacity(int rgb) {
+                  return alphaBits() | (rgb & 0x00FFFFFF);
+              }
+
+              /** @return the new opacity, clamped */
+              public static int adjustOpacity(int deltaPercent) {
+                  ensureLoaded();
+
+                  int updated = opacityPercent + deltaPercent;
+                  if (updated < MIN_OPACITY) {
+                      updated = MIN_OPACITY;
+                  }
+                  if (updated > MAX_OPACITY) {
+                      updated = MAX_OPACITY;
+                  }
+
+                  if (updated != opacityPercent) {
+                      opacityPercent = updated;
+                      save();
+                  }
+                  return opacityPercent;
+              }
+
+              private static synchronized void ensureLoaded() {
+                  if (loaded) {
+                      return;
+                  }
+                  loaded = true;
+
+                  try {
+                      Path path = configPath();
+                      if (!Files.exists(path)) {
+                          return;
+                      }
+                      BufferedReader reader = Files.newBufferedReader(path);
+                      try {
+                          String line;
+                          while ((line = reader.readLine()) != null) {
+                              int equals = line.indexOf('=');
+                              if (equals <= 0) {
+                                  continue;
+                              }
+                              String key = line.substring(0, equals).trim();
+                              String value = line.substring(equals + 1).trim();
+                              if ("opacity".equals(key)) {
+                                  opacityPercent = clamp(Integer.parseInt(value));
+                              }
+                          }
+                      } finally {
+                          reader.close();
+                      }
+                  } catch (IOException failed) {
+                      // Unreadable config is not worth crashing over; defaults stand.
+                  } catch (NumberFormatException failed) {
+                      opacityPercent = 100;
+                  }
+              }
+
+              private static void save() {
+                  try {
+                      Path path = configPath();
+                      Path parent = path.getParent();
+                      if (parent != null) {
+                          Files.createDirectories(parent);
+                      }
+                      BufferedWriter writer = Files.newBufferedWriter(path);
+                      try {
+                          writer.write("opacity=" + opacityPercent);
+                          writer.newLine();
+                      } finally {
+                          writer.close();
+                      }
+                  } catch (IOException failed) {
+                      // Setting still applies for this session even if it cannot persist.
+                  }
+              }
+
+              private static int clamp(int value) {
+                  if (value < MIN_OPACITY) {
+                      return MIN_OPACITY;
+                  }
+                  if (value > MAX_OPACITY) {
+                      return MAX_OPACITY;
+                  }
+                  return value;
+              }
+
+              private static Path configPath() {
+                  return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+              }
+          }
           SFEOF
           mkdir -p src/main/java/com/adamarmanyos/stronghold
           cat > src/main/java/com/adamarmanyos/stronghold/StrongholdFinderClient.java <<'SFEOF'
@@ -153,6 +301,8 @@ jobs:
               private static final int KEY_CAPTURE = GLFW.GLFW_KEY_C;
               private static final int KEY_CALCULATE = GLFW.GLFW_KEY_N;
               private static final int KEY_RESET = GLFW.GLFW_KEY_B;
+              private static final int KEY_FADE = GLFW.GLFW_KEY_LEFT_BRACKET;
+              private static final int KEY_BRIGHTEN = GLFW.GLFW_KEY_RIGHT_BRACKET;
 
               // ---------------------------------------------------------------- layout
 
@@ -185,6 +335,8 @@ jobs:
               private static boolean prevCapture;
               private static boolean prevCalculate;
               private static boolean prevReset;
+              private static boolean prevFade;
+              private static boolean prevBrighten;
 
               private StrongholdOverlay() {
               }
@@ -218,6 +370,8 @@ jobs:
                       prevCapture = false;
                       prevCalculate = false;
                       prevReset = false;
+                      prevFade = false;
+                      prevBrighten = false;
                       return;
                   }
 
@@ -227,6 +381,8 @@ jobs:
                   boolean capture = modifier && InputUtil.isKeyPressed(window, KEY_CAPTURE);
                   boolean calculate = !modifier && InputUtil.isKeyPressed(window, KEY_CALCULATE);
                   boolean reset = !modifier && InputUtil.isKeyPressed(window, KEY_RESET);
+                  boolean fade = !modifier && InputUtil.isKeyPressed(window, KEY_FADE);
+                  boolean brighten = !modifier && InputUtil.isKeyPressed(window, KEY_BRIGHTEN);
 
                   if (capture && !prevCapture) {
                       capture(client.player);
@@ -237,10 +393,18 @@ jobs:
                   if (reset && !prevReset) {
                       reset();
                   }
+                  if (fade && !prevFade) {
+                      showNotice("Opacity " + StrongholdConfig.adjustOpacity(-StrongholdConfig.OPACITY_STEP) + "%");
+                  }
+                  if (brighten && !prevBrighten) {
+                      showNotice("Opacity " + StrongholdConfig.adjustOpacity(StrongholdConfig.OPACITY_STEP) + "%");
+                  }
 
                   prevCapture = capture;
                   prevCalculate = calculate;
                   prevReset = reset;
+                  prevFade = fade;
+                  prevBrighten = brighten;
               }
 
               // ----------------------------------------------------------------- state
@@ -295,7 +459,8 @@ jobs:
                   if (current != null && !current.isEmpty()) {
                       StrongholdPrediction best = current.get(0);
 
-                      client.textRenderer.drawWithShadow(matrices, "STRONGHOLD", ORIGIN_X, y, COLOR_TITLE);
+                      client.textRenderer.drawWithShadow(matrices, "STRONGHOLD", ORIGIN_X, y,
+                          StrongholdConfig.applyOpacity(COLOR_TITLE));
                       y += LINE_HEIGHT;
 
                       y = row(client, matrices, y, "Overworld",
@@ -340,15 +505,18 @@ jobs:
                       if (System.currentTimeMillis() > noticeExpiresAt) {
                           notice = null;
                       } else {
-                          client.textRenderer.drawWithShadow(matrices, notice, ORIGIN_X, y, COLOR_NOTICE);
+                          client.textRenderer.drawWithShadow(matrices, notice, ORIGIN_X, y,
+                              StrongholdConfig.applyOpacity(COLOR_NOTICE));
                       }
                   }
               }
 
               private static int row(MinecraftClient client, MatrixStack matrices, int y,
                                      String label, String value, int valueColor) {
-                  client.textRenderer.drawWithShadow(matrices, label, ORIGIN_X, y, COLOR_LABEL);
-                  client.textRenderer.drawWithShadow(matrices, value, ORIGIN_X + VALUE_COLUMN, y, valueColor);
+                  client.textRenderer.drawWithShadow(matrices, label, ORIGIN_X, y,
+                      StrongholdConfig.applyOpacity(COLOR_LABEL));
+                  client.textRenderer.drawWithShadow(matrices, value, ORIGIN_X + VALUE_COLUMN, y,
+                      StrongholdConfig.applyOpacity(valueColor));
                   return y + LINE_HEIGHT;
               }
 
