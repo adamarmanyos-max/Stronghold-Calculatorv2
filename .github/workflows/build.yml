@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.9.0
+          mod_version=2.9.1
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -476,8 +476,12 @@ jobs:
               private static final double MEASURE_SENSITIVITY = 0.0D;
 
               // Running view: Quake Pro and a fast mouse.
+              //
+              // mouseSensitivity is NOT the percentage the options slider shows. The
+              // slider displays the field times 200, which is why vanilla's default of
+              // 0.5 reads as 100%. So 80% on the slider is 0.4 here, not 0.8.
               private static final double TRAVEL_FOV = 110.0D;
-              private static final double TRAVEL_SENSITIVITY = 0.8D;
+              private static final double TRAVEL_SENSITIVITY = 0.4D;
 
               /** FOV below this counts as already being in measuring view. */
               private static final double MEASURE_FOV_THRESHOLD = 70.0D;
@@ -553,7 +557,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v2.9.0";
+              private static final String VERSION = "v2.9.1";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
