@@ -36,16 +36,12 @@ jobs:
           SFEOF
           cat > build.gradle <<'SFEOF'
           plugins {
-              id 'fabric-loom' version '1.7-SNAPSHOT'
-              id 'maven-publish'
+              id 'fabric-loom' version '0.12-SNAPSHOT'
           }
 
+          archivesBaseName = project.archives_base_name
           version = project.mod_version
           group = project.maven_group
-
-          base {
-              archivesName = project.archives_base_name
-          }
 
           dependencies {
               minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -75,12 +71,6 @@ jobs:
               sourceCompatibility = JavaVersion.VERSION_17
               targetCompatibility = JavaVersion.VERSION_17
           }
-
-          jar {
-              from("LICENSE") {
-                  rename { "${it}_${project.base.archivesName.get()}" }
-              }
-          }
           SFEOF
           cat > gradle.properties <<'SFEOF'
           org.gradle.jvmargs=-Xmx2G
@@ -88,7 +78,7 @@ jobs:
           # Minecraft / Fabric
           minecraft_version=1.16.1
           yarn_mappings=1.16.1+build.21
-          loader_version=0.15.11
+          loader_version=0.14.24
 
           # Mod
           mod_version=2.0.0
@@ -645,10 +635,10 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '7.6.4'
 
       - name: Build
-        run: gradle build --stacktrace --no-daemon
+        run: gradle build --no-daemon
 
       - name: Verify the jar
         run: |
