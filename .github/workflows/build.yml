@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.3.0
+          mod_version=2.4.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -279,6 +279,7 @@ jobs:
           import com.adamarmanyos.stronghold.calc.StrongholdPrediction;
 
           import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawableHelper;
           import net.minecraft.client.network.ClientPlayerEntity;
           import net.minecraft.client.util.InputUtil;
           import net.minecraft.client.util.math.MatrixStack;
@@ -292,6 +293,12 @@ jobs:
            *
            * Everything runs on the render thread, so no synchronisation is needed and no
            * GLFW call is ever made off-thread.
+           *
+           * The panel layout deliberately mirrors Ninjabrain Bot's window: a title bar,
+           * a candidate table with Chunk / % / Dist. / Nether columns, then an eye-throw
+           * table with x / z / Angle / Error. It cannot match exactly - Minecraft only
+           * offers its own bitmap font, and there is no way to draw rounded corners
+           * cheaply - but the structure, columns and colour language are the same.
            */
           public final class StrongholdOverlay {
 
@@ -306,21 +313,64 @@ jobs:
 
               // ---------------------------------------------------------------- layout
 
-              private static final int ORIGIN_X = 4;
-              private static final int ORIGIN_Y = 4;
-              private static final int LINE_HEIGHT = 10;
-              private static final int VALUE_COLUMN = 62;
+              private static final int PANEL_X = 4;
+              private static final int PANEL_Y = 4;
+              private static final int PANEL_WIDTH = 234;
 
-              private static final int COLOR_TITLE = 0xFFAA00;
-              private static final int COLOR_LABEL = 0xA0A0A0;
-              private static final int COLOR_VALUE = 0xFFFFFF;
-              private static final int COLOR_GOOD = 0x55FF55;
-              private static final int COLOR_FAIR = 0xFFFF55;
-              private static final int COLOR_POOR = 0xFF5555;
-              private static final int COLOR_NOTICE = 0xFFFF55;
+              private static final int PADDING = 5;
+              private static final int TITLE_BAR_HEIGHT = 14;
+              private static final int ROW_HEIGHT = 11;
+
+              // Column geometry, measured from the panel's left edge. These were checked
+              // against Minecraft's font metrics for the widest values each column can
+              // hold - a ring-3 stronghold at (-552, -552) chunk / (-1104, -1104) Nether,
+              // 100.0% certainty, a five digit distance, and throw coordinates out to
+              // -29999.99 - so nothing collides or spills past the panel edge.
+              private static final int COL_CHUNK_CENTRE = 39;
+              private static final int COL_PERCENT_RIGHT = 111;
+              private static final int COL_DIST_RIGHT = 147;
+              private static final int COL_NETHER_CENTRE = 191;
+
+              // Eye-throw table columns.
+              private static final int COL_THROW_X_RIGHT = 62;
+              private static final int COL_THROW_Z_RIGHT = 124;
+              private static final int COL_THROW_ANGLE_RIGHT = 176;
+              private static final int COL_THROW_ERROR_RIGHT = 229;
+
+              // ---------------------------------------------------------------- colours
+
+              private static final int PANEL_BACKGROUND = 0x1C1F24;
+              private static final int TITLE_BAR_BACKGROUND = 0x2C3138;
+              private static final int SEPARATOR = 0x3A3F47;
+
+              private static final int COLOR_TITLE = 0xF0F2F5;
+              private static final int COLOR_VERSION = 0x7A828C;
+              private static final int COLOR_HEADER = 0xB4BECC;
+              private static final int COLOR_COORD = 0x8FA8C8;
+              private static final int COLOR_NUMBER = 0xD8DCE2;
+              private static final int COLOR_SECTION = 0xF0F2F5;
+
+              private static final int COLOR_HIGH = 0x5BC46B;
+              private static final int COLOR_MEDIUM = 0xE0A83C;
+              private static final int COLOR_LOW = 0xC24A4A;
+
+              private static final int COLOR_NOTICE = 0xFFD24A;
+
+              // Certainty thresholds for the percentage colour, matching the reference
+              // window where a strong candidate is green and near-zero ones are red.
+              private static final double PERCENT_HIGH = 50.0D;
+              private static final double PERCENT_MEDIUM = 5.0D;
+
+              // Angle error thresholds in degrees, for the Error column colour.
+              private static final double ERROR_GOOD = 0.01D;
+              private static final double ERROR_FAIR = 0.05D;
+
+              // ------------------------------------------------------------------ state
 
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 2;
+
+              private static final String VERSION = "v2.4.0";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
@@ -351,7 +401,7 @@ jobs:
                   draw(client, matrices);
               }
 
-              // ---------------------------------------------------------------- input
+              // ----------------------------------------------------------------- input
 
               /**
                * Polls the raw key state each frame rather than hooking Minecraft's own
@@ -419,7 +469,11 @@ jobs:
                       MEASUREMENTS.remove(0);
                   }
 
-                  showNotice("Eye " + MEASUREMENTS.size() + " saved");
+                  if (MEASUREMENTS.size() >= CALCULATOR.minimumMeasurements()) {
+                      // Recalculate automatically, the way the reference tool updates as
+                      // soon as it has enough throws.
+                      calculate();
+                  }
               }
 
               private static void calculate() {
@@ -442,7 +496,7 @@ jobs:
               private static void reset() {
                   MEASUREMENTS.clear();
                   results = null;
-                  showNotice("Reset");
+                  notice = null;
               }
 
               private static void showNotice(String text) {
@@ -453,91 +507,221 @@ jobs:
               // --------------------------------------------------------------- drawing
 
               private static void draw(MinecraftClient client, MatrixStack matrices) {
-                  int y = ORIGIN_Y;
+                  boolean hasContent = !MEASUREMENTS.isEmpty() || (results != null && !results.isEmpty());
 
-                  List<StrongholdPrediction> current = results;
-                  if (current != null && !current.isEmpty()) {
-                      StrongholdPrediction best = current.get(0);
-
-                      client.textRenderer.drawWithShadow(matrices, "STRONGHOLD", ORIGIN_X, y,
-                          StrongholdConfig.applyOpacity(COLOR_TITLE));
-                      y += LINE_HEIGHT;
-
-                      y = row(client, matrices, y, "Overworld",
-                          best.overworldX + ", " + best.overworldZ, COLOR_VALUE);
-                      y = row(client, matrices, y, "Nether",
-                          best.netherX() + ", " + best.netherZ(), COLOR_VALUE);
-
-                      double dx = best.overworldX - client.player.getX();
-                      double dz = best.overworldZ - client.player.getZ();
-                      double distance = Math.sqrt((dx * dx) + (dz * dz));
-
-                      y = row(client, matrices, y, "Distance",
-                          Long.toString(Math.round(distance)), COLOR_VALUE);
-
-                      // Yaw the player should be facing to walk straight at it, in the
-                      // same convention the F3 screen shows.
-                      double heading = Math.toDegrees(Math.atan2(-dx, dz));
-                      y = row(client, matrices, y, "Head", format1(heading), COLOR_VALUE);
-
-                      if (best.hasCertainty()) {
-                          y = row(client, matrices, y, "Certainty",
-                              Math.round(best.certainty * 100.0D) + "%",
-                              certaintyColor(best.certainty));
-                      }
-
-                      if (best.hasUncertainty()) {
-                          y = row(client, matrices, y, "Precision",
-                              "+/-" + Math.round(best.errorRadius) + " (90%)", COLOR_VALUE);
-                      }
-
-                      // Anything else that fits the angles well enough to matter.
-                      for (int i = 1; i < current.size(); i++) {
-                          StrongholdPrediction alt = current.get(i);
-                          y = row(client, matrices, y, i == 1 ? "Also fits" : "",
-                              alt.overworldX + ", " + alt.overworldZ
-                                  + "  " + Math.round(alt.certainty * 100.0D) + "%",
-                              COLOR_FAIR);
-                      }
+                  if (hasContent) {
+                      drawPanel(client, matrices);
                   }
 
                   if (notice != null) {
                       if (System.currentTimeMillis() > noticeExpiresAt) {
                           notice = null;
                       } else {
-                          client.textRenderer.drawWithShadow(matrices, notice, ORIGIN_X, y,
-                              StrongholdConfig.applyOpacity(COLOR_NOTICE));
+                          int y = hasContent ? (PANEL_Y + panelHeight() + 4) : PANEL_Y;
+                          text(client, matrices, notice, PANEL_X + PADDING, y, COLOR_NOTICE);
                       }
                   }
               }
 
-              private static int row(MinecraftClient client, MatrixStack matrices, int y,
-                                     String label, String value, int valueColor) {
-                  client.textRenderer.drawWithShadow(matrices, label, ORIGIN_X, y,
-                      StrongholdConfig.applyOpacity(COLOR_LABEL));
-                  client.textRenderer.drawWithShadow(matrices, value, ORIGIN_X + VALUE_COLUMN, y,
-                      StrongholdConfig.applyOpacity(valueColor));
-                  return y + LINE_HEIGHT;
+              private static int candidateRows() {
+                  return results == null ? 0 : results.size();
               }
 
-              private static int certaintyColor(double certainty) {
-                  if (certainty >= 0.9D) {
-                      return COLOR_GOOD;
+              private static int panelHeight() {
+                  int height = TITLE_BAR_HEIGHT;
+
+                  if (candidateRows() > 0) {
+                      height += 3;
+                      height += ROW_HEIGHT;                       // column headers
+                      height += candidateRows() * ROW_HEIGHT;     // candidates
+                      height += 4;
                   }
-                  if (certainty >= 0.6D) {
-                      return COLOR_FAIR;
-                  }
-                  return COLOR_POOR;
+
+                  height += 1;                                    // separator
+                  height += 3;
+                  height += ROW_HEIGHT;                           // "Ender eye throws"
+                  height += ROW_HEIGHT;                           // column headers
+                  height += MEASUREMENTS.size() * ROW_HEIGHT;
+                  height += PADDING;
+
+                  return height;
               }
 
-              /** One decimal place without pulling in String.format's locale handling. */
-              private static String format1(double value) {
-                  long scaled = Math.round(value * 10.0D);
+              private static void drawPanel(MinecraftClient client, MatrixStack matrices) {
+                  int left = PANEL_X;
+                  int top = PANEL_Y;
+                  int right = left + PANEL_WIDTH;
+                  int bottom = top + panelHeight();
+
+                  fill(matrices, left, top, right, bottom, PANEL_BACKGROUND);
+                  fill(matrices, left, top, right, top + TITLE_BAR_HEIGHT, TITLE_BAR_BACKGROUND);
+
+                  int y = top + 3;
+
+                  text(client, matrices, "Stronghold Finder", left + PADDING, y, COLOR_TITLE);
+                  int titleWidth = client.textRenderer.getWidth("Stronghold Finder");
+                  text(client, matrices, VERSION, left + PADDING + titleWidth + 4, y, COLOR_VERSION);
+
+                  y = top + TITLE_BAR_HEIGHT;
+
+                  if (candidateRows() > 0) {
+                      y += 3;
+
+                      centred(client, matrices, "Chunk", left + COL_CHUNK_CENTRE, y, COLOR_HEADER);
+                      rightAligned(client, matrices, "%", left + COL_PERCENT_RIGHT, y, COLOR_HEADER);
+                      rightAligned(client, matrices, "Dist.", left + COL_DIST_RIGHT, y, COLOR_HEADER);
+                      centred(client, matrices, "Nether", left + COL_NETHER_CENTRE, y, COLOR_HEADER);
+                      y += ROW_HEIGHT;
+
+                      for (int i = 0; i < results.size(); i++) {
+                          StrongholdPrediction candidate = results.get(i);
+
+                          String chunk = "(" + Math.floorDiv(candidate.overworldX, 16)
+                              + ", " + Math.floorDiv(candidate.overworldZ, 16) + ")";
+                          String nether = "(" + candidate.netherX() + ", " + candidate.netherZ() + ")";
+
+                          double dx = candidate.overworldX - client.player.getX();
+                          double dz = candidate.overworldZ - client.player.getZ();
+                          long distance = Math.round(Math.sqrt((dx * dx) + (dz * dz)));
+
+                          centred(client, matrices, chunk, left + COL_CHUNK_CENTRE, y, COLOR_COORD);
+
+                          if (candidate.hasCertainty()) {
+                              double percent = candidate.certainty * 100.0D;
+                              rightAligned(client, matrices, decimals(percent, 1) + "%",
+                                  left + COL_PERCENT_RIGHT, y, percentColor(percent));
+                          } else {
+                              rightAligned(client, matrices, "-", left + COL_PERCENT_RIGHT, y, COLOR_NUMBER);
+                          }
+
+                          rightAligned(client, matrices, Long.toString(distance),
+                              left + COL_DIST_RIGHT, y, COLOR_NUMBER);
+                          centred(client, matrices, nether, left + COL_NETHER_CENTRE, y, COLOR_COORD);
+
+                          y += ROW_HEIGHT;
+                      }
+
+                      y += 4;
+                  }
+
+                  fill(matrices, left + PADDING, y, right - PADDING, y + 1, SEPARATOR);
+                  y += 1 + 3;
+
+                  text(client, matrices, "Ender eye throws", left + PADDING, y, COLOR_SECTION);
+                  y += ROW_HEIGHT;
+
+                  rightAligned(client, matrices, "x", left + COL_THROW_X_RIGHT, y, COLOR_HEADER);
+                  rightAligned(client, matrices, "z", left + COL_THROW_Z_RIGHT, y, COLOR_HEADER);
+                  rightAligned(client, matrices, "Angle", left + COL_THROW_ANGLE_RIGHT, y, COLOR_HEADER);
+                  rightAligned(client, matrices, "Error", left + COL_THROW_ERROR_RIGHT, y, COLOR_HEADER);
+                  y += ROW_HEIGHT;
+
+                  StrongholdPrediction best = (results == null || results.isEmpty()) ? null : results.get(0);
+
+                  for (int i = 0; i < MEASUREMENTS.size(); i++) {
+                      EyeMeasurement measurement = MEASUREMENTS.get(i);
+
+                      rightAligned(client, matrices, decimals(measurement.x, 2),
+                          left + COL_THROW_X_RIGHT, y, COLOR_COORD);
+                      rightAligned(client, matrices, decimals(measurement.z, 2),
+                          left + COL_THROW_Z_RIGHT, y, COLOR_COORD);
+                      rightAligned(client, matrices, decimals(measurement.yaw, 2),
+                          left + COL_THROW_ANGLE_RIGHT, y, COLOR_NUMBER);
+
+                      if (best == null) {
+                          rightAligned(client, matrices, "-", left + COL_THROW_ERROR_RIGHT, y, COLOR_NUMBER);
+                      } else {
+                          // How far this measured angle sits from the angle to the top
+                          // candidate, assuming that candidate is correct.
+                          double error = angleError(measurement, best);
+                          rightAligned(client, matrices, decimals(error, 3),
+                              left + COL_THROW_ERROR_RIGHT, y, errorColor(error));
+                      }
+
+                      y += ROW_HEIGHT;
+                  }
+              }
+
+              /** Residual in degrees between a measured angle and the predicted target. */
+              private static double angleError(EyeMeasurement measurement, StrongholdPrediction prediction) {
+                  double predicted = Math.toDegrees(Math.atan2(
+                      -(prediction.overworldX - measurement.x),
+                      prediction.overworldZ - measurement.z));
+
+                  double difference = (predicted - measurement.yaw + 180.0D) % 360.0D;
+                  if (difference < 0.0D) {
+                      difference += 360.0D;
+                  }
+                  return difference - 180.0D;
+              }
+
+              private static int percentColor(double percent) {
+                  if (percent >= PERCENT_HIGH) {
+                      return COLOR_HIGH;
+                  }
+                  if (percent >= PERCENT_MEDIUM) {
+                      return COLOR_MEDIUM;
+                  }
+                  return COLOR_LOW;
+              }
+
+              private static int errorColor(double error) {
+                  double magnitude = Math.abs(error);
+                  if (magnitude <= ERROR_GOOD) {
+                      return COLOR_HIGH;
+                  }
+                  if (magnitude <= ERROR_FAIR) {
+                      return COLOR_MEDIUM;
+                  }
+                  return COLOR_LOW;
+              }
+
+              // ------------------------------------------------------------- utilities
+
+              private static void fill(MatrixStack matrices, int x1, int y1, int x2, int y2, int rgb) {
+                  DrawableHelper.fill(matrices, x1, y1, x2, y2, StrongholdConfig.applyOpacity(rgb));
+              }
+
+              /** Flat text, no drop shadow: the panel reads as a UI rather than a HUD. */
+              private static void text(MinecraftClient client, MatrixStack matrices,
+                                       String value, int x, int y, int rgb) {
+                  client.textRenderer.draw(matrices, value, x, y, StrongholdConfig.applyOpacity(rgb));
+              }
+
+              private static void centred(MinecraftClient client, MatrixStack matrices,
+                                          String value, int centreX, int y, int rgb) {
+                  int width = client.textRenderer.getWidth(value);
+                  text(client, matrices, value, centreX - (width / 2), y, rgb);
+              }
+
+              private static void rightAligned(MinecraftClient client, MatrixStack matrices,
+                                               String value, int rightX, int y, int rgb) {
+                  int width = client.textRenderer.getWidth(value);
+                  text(client, matrices, value, rightX - width, y, rgb);
+              }
+
+              /**
+               * Fixed decimal places without String.format, which drags in locale
+               * handling and would print commas for some players.
+               */
+              private static String decimals(double value, int places) {
+                  long scale = 1L;
+                  for (int i = 0; i < places; i++) {
+                      scale *= 10L;
+                  }
+
+                  long scaled = Math.round(value * scale);
                   boolean negative = scaled < 0L;
                   if (negative) {
                       scaled = -scaled;
                   }
-                  String text = (scaled / 10L) + "." + (scaled % 10L);
+
+                  String fraction = Long.toString(scaled % scale);
+                  while (fraction.length() < places) {
+                      fraction = "0" + fraction;
+                  }
+
+                  String text = (scaled / scale) + "." + fraction;
                   return negative ? ("-" + text) : text;
               }
 
