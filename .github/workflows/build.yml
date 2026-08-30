@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.7.2
+          mod_version=2.8.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -141,6 +141,21 @@ jobs:
                */
               public static final int[] SCALE_STEPS = { 50, 75, 100, 125, 150, 200 };
 
+              /**
+               * Assumed standard deviation of one measured angle, in hundredths of a
+               * degree. Stored as an integer so the config file stays simple.
+               *
+               * The default of 6 (0.06 deg) suits careful aiming with a mouse at low FOV.
+               * Real measurements on a touch device or in a hurry run several times
+               * larger; the panel's Error column shows what yours actually are, and the
+               * fit warning tells you when this value is too small to explain them.
+               */
+              public static final int MIN_SIGMA = 2;
+              public static final int MAX_SIGMA = 50;
+              private static final int DEFAULT_SIGMA = 6;
+
+              private static int sigmaHundredths = DEFAULT_SIGMA;
+
               private static int opacityPercent = 100;
               private static int scaleIndex = 2;
               private static boolean loaded;
@@ -151,6 +166,32 @@ jobs:
               public static int opacityPercent() {
                   ensureLoaded();
                   return opacityPercent;
+              }
+
+              /** Assumed angle standard deviation, in degrees. */
+              public static double angleSigma() {
+                  ensureLoaded();
+                  return sigmaHundredths / 100.0D;
+              }
+
+              public static int sigmaHundredths() {
+                  ensureLoaded();
+                  return sigmaHundredths;
+              }
+
+              public static void setSigmaHundredths(int value) {
+                  ensureLoaded();
+                  int updated = value;
+                  if (updated < MIN_SIGMA) {
+                      updated = MIN_SIGMA;
+                  }
+                  if (updated > MAX_SIGMA) {
+                      updated = MAX_SIGMA;
+                  }
+                  if (updated != sigmaHundredths) {
+                      sigmaHundredths = updated;
+                      save();
+                  }
               }
 
               public static int scalePercent() {
@@ -286,6 +327,8 @@ jobs:
                                   opacityPercent = clamp(Integer.parseInt(value));
                               } else if ("scale".equals(key)) {
                                   scaleIndex = nearestScaleIndex(Integer.parseInt(value));
+                              } else if ("sigma".equals(key)) {
+                                  sigmaHundredths = clampSigma(Integer.parseInt(value));
                               }
                           }
                       } finally {
@@ -296,6 +339,7 @@ jobs:
                   } catch (NumberFormatException failed) {
                       opacityPercent = 100;
                       scaleIndex = 2;
+                      sigmaHundredths = DEFAULT_SIGMA;
                   }
               }
 
@@ -311,6 +355,8 @@ jobs:
                           writer.write("opacity=" + opacityPercent);
                           writer.newLine();
                           writer.write("scale=" + SCALE_STEPS[scaleIndex]);
+                          writer.newLine();
+                          writer.write("sigma=" + sigmaHundredths);
                           writer.newLine();
                       } finally {
                           writer.close();
@@ -332,6 +378,16 @@ jobs:
                       }
                   }
                   return best;
+              }
+
+              private static int clampSigma(int value) {
+                  if (value < MIN_SIGMA) {
+                      return MIN_SIGMA;
+                  }
+                  if (value > MAX_SIGMA) {
+                      return MAX_SIGMA;
+                  }
+                  return value;
               }
 
               private static int clamp(int value) {
@@ -460,6 +516,13 @@ jobs:
               private static final int COLOR_LOW = 0xC24A4A;
 
               private static final int COLOR_NOTICE = 0xFFD24A;
+              private static final int COLOR_WARNING = 0xFF7A5A;
+
+              /** Below this separation between throws, triangulation is badly weak. */
+              private static final double MIN_USEFUL_BASELINE = 100.0D;
+
+              /** Chi-square per measurement above which the angles clearly disagree. */
+              private static final double FIT_WARNING_RATIO = 2.0D;
 
               // Certainty thresholds for the percentage colour, matching the reference
               // window where a strong candidate is green and near-zero ones are red.
@@ -475,7 +538,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v2.7.2";
+              private static final String VERSION = "v2.8.0";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
@@ -691,6 +754,9 @@ jobs:
                   height += ROW_HEIGHT;                           // "Ender eye throws"
                   height += ROW_HEIGHT;                           // column headers
                   height += MEASUREMENTS.size() * ROW_HEIGHT;
+                  if (warning() != null) {
+                      height += ROW_HEIGHT + 2;
+                  }
                   height += PADDING;
 
                   return height;
@@ -791,6 +857,63 @@ jobs:
 
                       y += ROW_HEIGHT;
                   }
+
+                  String warning = warning();
+                  if (warning != null) {
+                      y += 2;
+                      text(client, matrices, warning, left + PADDING, y, COLOR_WARNING);
+                  }
+              }
+
+              /**
+               * The single most useful complaint about the current measurements, or null.
+               *
+               * Certainty answers "which candidate", not "are the measurements any good",
+               * so a tight but wrong answer can still read 100%. These two checks catch
+               * the cases that produce one.
+               */
+              private static String warning() {
+                  if (MEASUREMENTS.size() < 2 || results == null || results.isEmpty()) {
+                      return null;
+                  }
+
+                  double baseline = shortestBaseline();
+                  if (baseline < MIN_USEFUL_BASELINE) {
+                      return "Throws " + Math.round(baseline) + " blocks apart - move further";
+                  }
+
+                  StrongholdPrediction best = results.get(0);
+                  double worst = 0.0D;
+                  double chiSquare = 0.0D;
+                  for (int i = 0; i < MEASUREMENTS.size(); i++) {
+                      double error = angleError(MEASUREMENTS.get(i), best);
+                      double scaled = error / StrongholdConfig.angleSigma();
+                      chiSquare += scaled * scaled;
+                      if (Math.abs(error) > worst) {
+                          worst = Math.abs(error);
+                      }
+                  }
+
+                  if (chiSquare > (FIT_WARNING_RATIO * MEASUREMENTS.size())) {
+                      return "Angles off by " + decimals(worst, 2) + " deg - retake";
+                  }
+                  return null;
+              }
+
+              /** Closest separation between any two throws. */
+              private static double shortestBaseline() {
+                  double shortest = Double.MAX_VALUE;
+                  for (int i = 0; i < MEASUREMENTS.size(); i++) {
+                      for (int j = i + 1; j < MEASUREMENTS.size(); j++) {
+                          EyeMeasurement a = MEASUREMENTS.get(i);
+                          EyeMeasurement b = MEASUREMENTS.get(j);
+                          double distance = Math.hypot(a.x - b.x, a.z - b.z);
+                          if (distance < shortest) {
+                              shortest = distance;
+                          }
+                      }
+                  }
+                  return shortest;
               }
 
               /** Residual in degrees between a measured angle and the predicted target. */
@@ -929,7 +1052,7 @@ jobs:
           public class StrongholdSettingsScreen extends Screen {
 
               private static final int PANEL_WIDTH = 220;
-              private static final int PANEL_HEIGHT = 118;
+              private static final int PANEL_HEIGHT = 154;
 
               private static final int SLIDER_WIDTH = 180;
               private static final int SLIDER_HEIGHT = 16;
@@ -952,6 +1075,7 @@ jobs:
 
               private int sizeSliderY;
               private int opacitySliderY;
+              private int sigmaSliderY;
 
               /** Which slider the mouse is currently dragging, or -1. */
               private int dragging = -1;
@@ -967,6 +1091,7 @@ jobs:
 
                   this.sizeSliderY = this.panelTop + 38;
                   this.opacitySliderY = this.panelTop + 74;
+                  this.sigmaSliderY = this.panelTop + 110;
               }
 
               /** Keeps the world rendering behind the screen instead of pausing. */
@@ -998,6 +1123,9 @@ jobs:
 
                   drawSlider(matrices, "Opacity", StrongholdConfig.opacityPercent() + "%",
                       opacityFraction(), this.opacitySliderY, this.dragging == 1);
+
+                  drawSlider(matrices, "Aim error", sigmaText(),
+                      sigmaFraction(), this.sigmaSliderY, this.dragging == 2);
 
                   centeredText(matrices, "Esc to close", left + (PANEL_WIDTH / 2), bottom - 14, TEXT_DIM);
 
@@ -1064,6 +1192,24 @@ jobs:
                   return (StrongholdConfig.opacityPercent() - StrongholdConfig.MIN_OPACITY) / span;
               }
 
+              /** Sigma shown in degrees, e.g. "0.06 deg". */
+              private String sigmaText() {
+                  int hundredths = StrongholdConfig.sigmaHundredths();
+                  String fraction = hundredths < 10 ? ("0" + hundredths) : Integer.toString(hundredths);
+                  return "0." + fraction + " deg";
+              }
+
+              private double sigmaFraction() {
+                  double span = StrongholdConfig.MAX_SIGMA - StrongholdConfig.MIN_SIGMA;
+                  return (StrongholdConfig.sigmaHundredths() - StrongholdConfig.MIN_SIGMA) / span;
+              }
+
+              private void applySigma(double fraction) {
+                  double span = StrongholdConfig.MAX_SIGMA - StrongholdConfig.MIN_SIGMA;
+                  StrongholdConfig.setSigmaHundredths(
+                      (int) Math.round(StrongholdConfig.MIN_SIGMA + (fraction * span)));
+              }
+
               private void applySize(double fraction) {
                   int steps = StrongholdConfig.SCALE_STEPS.length - 1;
                   StrongholdConfig.setScaleIndex((int) Math.round(fraction * steps));
@@ -1088,6 +1234,9 @@ jobs:
                   }
                   if (mouseY >= this.opacitySliderY - 2 && mouseY <= this.opacitySliderY + SLIDER_HEIGHT + 2) {
                       return 1;
+                  }
+                  if (mouseY >= this.sigmaSliderY - 2 && mouseY <= this.sigmaSliderY + SLIDER_HEIGHT + 2) {
+                      return 2;
                   }
                   return -1;
               }
@@ -1134,8 +1283,10 @@ jobs:
               private void apply(int slider, double fraction) {
                   if (slider == 0) {
                       applySize(fraction);
-                  } else {
+                  } else if (slider == 1) {
                       applyOpacity(fraction);
+                  } else {
+                      applySigma(fraction);
                   }
               }
           }
@@ -1372,6 +1523,8 @@ jobs:
           import java.util.ArrayList;
           import java.util.List;
 
+          import com.adamarmanyos.stronghold.StrongholdConfig;
+
           /**
            * Triangulation with a prior over Minecraft's stronghold generation.
            *
@@ -1457,8 +1610,20 @@ jobs:
               /** How far the post-placement biome search can displace a stronghold. */
               private static final double BIOME_SEARCH_MARGIN = 112.0D;
 
-              /** Assumed standard deviation of one measured angle, in degrees. */
-              public static final double ANGLE_SIGMA_DEGREES = 0.06D;
+              /**
+               * Assumed standard deviation of one measured angle, in degrees, from the
+               * user's settings. This is an assumption about aim, not a measurement of
+               * it - the fit check below reports when it is clearly too small.
+               */
+              private static double sigma() {
+                  return StrongholdConfig.angleSigma();
+              }
+
+              /**
+               * Residuals larger than this many sigma, in aggregate, mean the angles
+               * cannot all be explained by the reported location. See applyFitPenalty.
+               */
+              private static final double FIT_PENALTY_SCALE = 0.5D;
 
               private static final double GRID_RADIAL_STEP = 24.0D;
               private static final double GRID_ARC_STEP = 24.0D;
@@ -1507,7 +1672,7 @@ jobs:
 
               @Override
               public String name() {
-                  return "ring-aware Bayesian (sigma=" + ANGLE_SIGMA_DEGREES + " deg)";
+                  return "ring-aware Bayesian (sigma=" + sigma() + " deg)";
               }
 
               @Override
@@ -1537,7 +1702,7 @@ jobs:
 
                   // Pass one: log likelihood of every cell, tracking the maximum so the
                   // exponential below cannot underflow to zero everywhere.
-                  double cutoff = MAX_RESIDUAL_SIGMAS * ANGLE_SIGMA_DEGREES;
+                  double cutoff = MAX_RESIDUAL_SIGMAS * sigma();
                   double maxLog = Double.NEGATIVE_INFINITY;
 
                   for (int i = 0; i < cells; i++) {
@@ -1555,7 +1720,7 @@ jobs:
                               break;
                           }
 
-                          double residual = residualDegrees / ANGLE_SIGMA_DEGREES;
+                          double residual = residualDegrees / sigma();
                           logLikelihood -= 0.5D * residual * residual;
                       }
 
@@ -1662,7 +1827,7 @@ jobs:
                           (int) Math.floor(refined[1] + 0.5D),
                           radius90,
                           crossing,
-                          certainty));
+                          applyFitPenalty(certainty, measurements, refined[0], refined[1])));
                   }
 
                   if (candidates.isEmpty()) {
@@ -1699,7 +1864,7 @@ jobs:
                               EyeMeasurement measurement = measurements.get(m);
                               double predicted = Math.toDegrees(Math.atan2(
                                   -(x - measurement.x), z - measurement.z));
-                              double residual = wrapDegrees(predicted - measurement.yaw) / ANGLE_SIGMA_DEGREES;
+                              double residual = wrapDegrees(predicted - measurement.yaw) / sigma();
                               logLikelihood -= 0.5D * residual * residual;
                           }
 
@@ -1766,7 +1931,7 @@ jobs:
                               EyeMeasurement measurement = measurements.get(m);
                               double predicted = Math.toDegrees(Math.atan2(
                                   -(x - measurement.x), z - measurement.z));
-                              double residual = wrapDegrees(predicted - measurement.yaw) / ANGLE_SIGMA_DEGREES;
+                              double residual = wrapDegrees(predicted - measurement.yaw) / sigma();
                               logLikelihood -= 0.5D * residual * residual;
                           }
 
@@ -1802,6 +1967,41 @@ jobs:
                       }
                   }
                   return FINE_HALF_WIDTH;
+              }
+
+              /**
+               * Scales certainty down when the measured angles disagree with the reported
+               * location by more than the assumed sigma can explain.
+               *
+               * Without this, certainty answers only "which candidate?" and not "is any
+               * candidate right?". The posterior is normalised, so a single tight peak
+               * reports 100% even when every sight line misses it badly - which is
+               * exactly what happens after a sloppy measurement, and is the most
+               * dangerous way for this tool to be wrong.
+               *
+               * The check is a chi-square: each residual in units of sigma, squared and
+               * summed. If that exceeds the number of measurements the fit is worse than
+               * the noise model allows, and certainty decays exponentially in the excess.
+               * When the model holds, the excess is near zero and certainty is untouched
+               * - verified in simulation, where median certainty stayed at 100% and the
+               * calibration of the reported radius was unchanged.
+               */
+              private static double applyFitPenalty(double certainty, List<EyeMeasurement> measurements,
+                                                    double x, double z) {
+                  double chiSquare = 0.0D;
+                  for (int i = 0; i < measurements.size(); i++) {
+                      EyeMeasurement measurement = measurements.get(i);
+                      double predicted = Math.toDegrees(Math.atan2(
+                          -(x - measurement.x), z - measurement.z));
+                      double residual = wrapDegrees(predicted - measurement.yaw) / sigma();
+                      chiSquare += residual * residual;
+                  }
+
+                  double excess = chiSquare - measurements.size();
+                  if (excess <= 0.0D) {
+                      return certainty;
+                  }
+                  return certainty * Math.exp(-FIT_PENALTY_SCALE * excess);
               }
 
               /** Wrap a degree difference into (-180, 180]. */
