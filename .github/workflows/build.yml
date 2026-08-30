@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.6.0
+          mod_version=2.6.1
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -475,7 +475,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 2;
 
-              private static final String VERSION = "v2.6.0";
+              private static final String VERSION = "v2.6.1";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
@@ -921,8 +921,9 @@ jobs:
            * and was renamed from AbstractButtonWidget to ClickableWidget at the same
            * time, so building against it means guessing at the exact 1.16.1 signature.
            * Everything used here - Screen's constructor, render, mouse callbacks, and
-           * DrawableHelper's static fill and drawCenteredString - is stable across those
-           * versions.
+           * DrawableHelper.fill - is stable across those versions. Text centring is done
+           * by measuring the string rather than calling drawCenteredString, which is an
+           * instance method in 1.16.1 and static in later versions.
            */
           public class StrongholdSettingsScreen extends Screen {
 
@@ -989,8 +990,7 @@ jobs:
                   roundedRect(matrices, left + 1, top + 1, right - 1, bottom - 1, BACKGROUND);
                   roundedTop(matrices, left + 1, top + 1, right - 1, top + 20, TITLE_BAR);
 
-                  DrawableHelper.drawCenteredString(matrices, this.textRenderer,
-                      "Stronghold Finder", left + (PANEL_WIDTH / 2), top + 7, TEXT);
+                  centeredText(matrices, "Stronghold Finder", left + (PANEL_WIDTH / 2), top + 7, TEXT);
 
                   drawSlider(matrices, "Size", StrongholdConfig.scalePercent() + "%",
                       sizeFraction(), this.sizeSliderY, this.dragging == 0);
@@ -998,8 +998,7 @@ jobs:
                   drawSlider(matrices, "Opacity", StrongholdConfig.opacityPercent() + "%",
                       opacityFraction(), this.opacitySliderY, this.dragging == 1);
 
-                  DrawableHelper.drawCenteredString(matrices, this.textRenderer,
-                      "Esc to close", left + (PANEL_WIDTH / 2), bottom - 14, TEXT_DIM);
+                  centeredText(matrices, "Esc to close", left + (PANEL_WIDTH / 2), bottom - 14, TEXT_DIM);
 
                   super.render(matrices, mouseX, mouseY, delta);
               }
@@ -1018,6 +1017,19 @@ jobs:
                   DrawableHelper.fill(matrices, left + 3, top, right - 3, top + 1, color);
                   DrawableHelper.fill(matrices, left + 1, top + 1, right - 1, top + 3, color);
                   DrawableHelper.fill(matrices, left, top + 3, right, bottom, color);
+              }
+
+              /**
+               * Centred text drawn directly through the TextRenderer.
+               *
+               * DrawableHelper.drawCenteredString is an instance method in 1.16.1 (it
+               * only became static in a later version), so calling it as a static would
+               * not compile. Measuring the string and drawing it here avoids depending on
+               * which form this version happens to use.
+               */
+              private void centeredText(MatrixStack matrices, String value, int centreX, int y, int color) {
+                  int width = this.textRenderer.getWidth(value);
+                  this.textRenderer.draw(matrices, value, centreX - (width / 2.0F), y, color);
               }
 
               private void drawSlider(MatrixStack matrices, String label, String value,
