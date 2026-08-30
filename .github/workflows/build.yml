@@ -1,0 +1,674 @@
+name: Build Stronghold Finder jar
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write the project source
+        run: |
+          set -e
+          cat > LICENSE <<'SFEOF'
+          MIT License
+
+          Copyright (c) 2026 Adam Armanyos
+
+          Permission is hereby granted, free of charge, to any person obtaining a copy
+          of this software and associated documentation files (the "Software"), to deal
+          in the Software without restriction, including without limitation the rights
+          to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+          copies of the Software, and to permit persons to whom the Software is
+          furnished to do so, subject to the following conditions:
+
+          The above copyright notice and this permission notice shall be included in all
+          copies or substantial portions of the Software.
+
+          THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+          IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+          FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+          AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+          LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+          OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+          SOFTWARE.
+          SFEOF
+          cat > build.gradle <<'SFEOF'
+          plugins {
+              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+              // No Fabric API. The mod only needs Loader + Mixin, both of which are
+              // provided by fabric-loader itself.
+          }
+
+          processResources {
+              inputs.property "version", project.version
+
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              // Java 17 bytecode -> class file major version 61.
+              it.options.release = 17
+              it.options.encoding = "UTF-8"
+          }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+          }
+
+          jar {
+              from("LICENSE") {
+                  rename { "${it}_${project.base.archivesName.get()}" }
+              }
+          }
+          SFEOF
+          cat > gradle.properties <<'SFEOF'
+          org.gradle.jvmargs=-Xmx2G
+
+          # Minecraft / Fabric
+          minecraft_version=1.16.1
+          yarn_mappings=1.16.1+build.21
+          loader_version=0.15.11
+
+          # Mod
+          mod_version=2.0.0
+          maven_group=com.adamarmanyos
+          archives_base_name=stronghold-finder
+          SFEOF
+          cat > settings.gradle <<'SFEOF'
+          pluginManagement {
+              repositories {
+                  maven {
+                      name = 'Fabric'
+                      url = 'https://maven.fabricmc.net/'
+                  }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          rootProject.name = 'stronghold-finder'
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/StrongholdFinderClient.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import net.fabricmc.api.ClientModInitializer;
+
+          /**
+           * Entrypoint. There is intentionally nothing to do here: all behaviour is
+           * driven from the HUD render injection, which avoids needing Fabric API's
+           * tick/keybinding events.
+           */
+          public class StrongholdFinderClient implements ClientModInitializer {
+
+              @Override
+              public void onInitializeClient() {
+                  System.out.println("[strongholdfinder] loaded, engine: " + StrongholdOverlay.calculatorName());
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/StrongholdOverlay.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          import com.adamarmanyos.stronghold.calc.EyeMeasurement;
+          import com.adamarmanyos.stronghold.calc.StrongholdCalculator;
+          import com.adamarmanyos.stronghold.calc.StrongholdPrediction;
+          import com.adamarmanyos.stronghold.calc.TriangulationCalculator;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.client.util.math.MatrixStack;
+
+          import org.lwjgl.glfw.GLFW;
+
+          /**
+           * All mod state and rendering lives here. The mixin does nothing except call
+           * {@link #render(MatrixStack)} once per frame, which keeps the mixin itself
+           * trivial and means a mistake in this class can never break HUD injection.
+           *
+           * Everything runs on the render thread, so no synchronisation is needed and no
+           * GLFW call is ever made off-thread.
+           */
+          public final class StrongholdOverlay {
+
+              private static final int MAX_MEASUREMENTS = 2;
+
+              private static final int COLOR_TITLE = 0xFFAA00;
+              private static final int COLOR_TEXT = 0xFFFFFF;
+              private static final int COLOR_NOTICE = 0xFFFF55;
+
+              private static final long NOTICE_DURATION_MS = 3000L;
+
+              private static final StrongholdCalculator CALCULATOR = new TriangulationCalculator();
+
+              private static final List<EyeMeasurement> MEASUREMENTS = new ArrayList<EyeMeasurement>();
+
+              private static StrongholdPrediction result;
+
+              private static String notice;
+              private static long noticeExpiresAt;
+
+              // Previous key states, for rising-edge detection.
+              private static boolean prevCapture;
+              private static boolean prevCalculate;
+              private static boolean prevReset;
+
+              private StrongholdOverlay() {
+              }
+
+              public static void render(MatrixStack matrices) {
+                  MinecraftClient client = MinecraftClient.getInstance();
+                  if (client == null || client.player == null) {
+                      return;
+                  }
+
+                  pollKeys(client);
+                  draw(client, matrices);
+              }
+
+              // ---------------------------------------------------------------- input
+
+              /**
+               * Polls the raw key state each frame rather than hooking Minecraft's own
+               * key handling. This is deliberate: F3+C is a vanilla debug combination
+               * (copy position as a /tp command), and intercepting or cancelling it would
+               * risk breaking that behaviour. Reading the key state alongside vanilla
+               * leaves the vanilla action completely untouched.
+               *
+               * Note that holding F3+C down for several seconds is a vanilla "manual
+               * crash" shortcut. Tap it; do not hold it.
+               */
+              private static void pollKeys(MinecraftClient client) {
+                  if (client.currentScreen != null) {
+                      // A screen is open (chat, inventory, menus). Ignore keys so typing
+                      // "n" or "r" in chat cannot trigger the mod.
+                      prevCapture = false;
+                      prevCalculate = false;
+                      prevReset = false;
+                      return;
+                  }
+
+                  long window = client.getWindow().getHandle();
+
+                  boolean f3 = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_F3);
+                  boolean capture = f3 && InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_C);
+                  boolean calculate = !f3 && InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_N);
+                  boolean reset = !f3 && InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_R);
+
+                  if (capture && !prevCapture) {
+                      capture(client.player);
+                  }
+                  if (calculate && !prevCalculate) {
+                      calculate();
+                  }
+                  if (reset && !prevReset) {
+                      reset();
+                  }
+
+                  prevCapture = capture;
+                  prevCalculate = calculate;
+                  prevReset = reset;
+              }
+
+              // ----------------------------------------------------------------- state
+
+              private static void capture(ClientPlayerEntity player) {
+                  // In 1.16.1 yaw is a public field on Entity; there is no getYaw()
+                  // accessor on this version.
+                  EyeMeasurement measurement = new EyeMeasurement(player.getX(), player.getZ(), player.yaw);
+
+                  MEASUREMENTS.add(measurement);
+                  while (MEASUREMENTS.size() > MAX_MEASUREMENTS) {
+                      // Third and later measurements replace the oldest one.
+                      MEASUREMENTS.remove(0);
+                  }
+
+                  showNotice("Eye " + MEASUREMENTS.size() + " saved");
+              }
+
+              private static void calculate() {
+                  if (MEASUREMENTS.size() < CALCULATOR.minimumMeasurements()) {
+                      showNotice("Need 2 Eye measurements");
+                      return;
+                  }
+
+                  StrongholdCalculator.Result calculated = CALCULATOR.calculate(MEASUREMENTS);
+                  if (!calculated.isSuccess()) {
+                      result = null;
+                      showNotice(calculated.error());
+                      return;
+                  }
+
+                  result = calculated.best();
+                  notice = null;
+              }
+
+              private static void reset() {
+                  MEASUREMENTS.clear();
+                  result = null;
+                  showNotice("Reset");
+              }
+
+              private static void showNotice(String text) {
+                  notice = text;
+                  noticeExpiresAt = System.currentTimeMillis() + NOTICE_DURATION_MS;
+              }
+
+              // --------------------------------------------------------------- drawing
+
+              private static void draw(MinecraftClient client, MatrixStack matrices) {
+                  int y = 4;
+
+                  StrongholdPrediction current = result;
+                  if (current != null) {
+                      client.textRenderer.drawWithShadow(matrices, "STRONGHOLD", 4.0F, y, COLOR_TITLE);
+                      y += 10;
+                      client.textRenderer.drawWithShadow(
+                          matrices,
+                          "Overworld: X " + current.overworldX + "  Z " + current.overworldZ,
+                          4.0F, y, COLOR_TEXT);
+                      y += 10;
+                      client.textRenderer.drawWithShadow(
+                          matrices,
+                          "Nether:    X " + current.netherX() + "  Z " + current.netherZ(),
+                          4.0F, y, COLOR_TEXT);
+                      y += 10;
+                  }
+
+                  if (notice != null) {
+                      if (System.currentTimeMillis() > noticeExpiresAt) {
+                          notice = null;
+                      } else {
+                          client.textRenderer.drawWithShadow(matrices, notice, 4.0F, y, COLOR_NOTICE);
+                      }
+                  }
+              }
+
+              public static String calculatorName() {
+                  return CALCULATOR.name();
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold/calc
+          cat > src/main/java/com/adamarmanyos/stronghold/calc/EyeMeasurement.java <<'SFEOF'
+          package com.adamarmanyos.stronghold.calc;
+
+          /**
+           * A single Eye of Ender measurement: where the player stood and which way they
+           * were looking when the eye's flight direction was read off.
+           *
+           * Yaw is stored exactly as Minecraft reports it (degrees, unbounded).
+           */
+          public final class EyeMeasurement {
+
+              public final double x;
+              public final double z;
+              public final float yaw;
+
+              public EyeMeasurement(double x, double z, float yaw) {
+                  this.x = x;
+                  this.z = z;
+                  this.yaw = yaw;
+              }
+
+              /**
+               * Horizontal unit direction vector for this measurement.
+               *
+               * Minecraft yaw convention (1.16.1, unchanged for many versions):
+               *   yaw    0 -> facing south, +Z
+               *   yaw   90 -> facing west,  -X
+               *   yaw  180 -> facing north, -Z
+               *   yaw  270 -> facing east,  +X
+               *
+               * which gives dx = -sin(yaw), dz = +cos(yaw).
+               */
+              public double[] direction() {
+                  double rad = Math.toRadians(this.yaw);
+                  return new double[] { -Math.sin(rad), Math.cos(rad) };
+              }
+
+              @Override
+              public String toString() {
+                  return "EyeMeasurement[x=" + this.x + ", z=" + this.z + ", yaw=" + this.yaw + "]";
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold/calc
+          cat > src/main/java/com/adamarmanyos/stronghold/calc/StrongholdCalculator.java <<'SFEOF'
+          package com.adamarmanyos.stronghold.calc;
+
+          import java.util.Collections;
+          import java.util.List;
+
+          /**
+           * The calculation engine boundary.
+           *
+           * Everything above this interface (key handling, HUD drawing, state) is
+           * independent of how the stronghold position is worked out, so the current
+           * geometric engine can be swapped for a probabilistic one without touching the
+           * rest of the mod. See {@link TriangulationCalculator} for what is actually
+           * implemented today.
+           */
+          public interface StrongholdCalculator {
+
+              /** Human-readable name of the engine, shown in logs. */
+              String name();
+
+              /** Minimum number of measurements this engine needs before it can run. */
+              int minimumMeasurements();
+
+              /**
+               * @param measurements all measurements taken so far, oldest first
+               * @return candidates ranked best-first, or a failure
+               */
+              Result calculate(List<EyeMeasurement> measurements);
+
+              /**
+               * Either a ranked candidate list or a short failure message suitable for
+               * display on the HUD.
+               */
+              final class Result {
+
+                  private final List<StrongholdPrediction> candidates;
+                  private final String error;
+
+                  private Result(List<StrongholdPrediction> candidates, String error) {
+                      this.candidates = candidates;
+                      this.error = error;
+                  }
+
+                  public static Result of(List<StrongholdPrediction> candidates) {
+                      return new Result(candidates, null);
+                  }
+
+                  public static Result of(StrongholdPrediction single) {
+                      return new Result(Collections.singletonList(single), null);
+                  }
+
+                  public static Result failure(String message) {
+                      return new Result(Collections.<StrongholdPrediction>emptyList(), message);
+                  }
+
+                  public boolean isSuccess() {
+                      return this.error == null && !this.candidates.isEmpty();
+                  }
+
+                  public String error() {
+                      return this.error;
+                  }
+
+                  public List<StrongholdPrediction> candidates() {
+                      return this.candidates;
+                  }
+
+                  public StrongholdPrediction best() {
+                      return this.candidates.get(0);
+                  }
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold/calc
+          cat > src/main/java/com/adamarmanyos/stronghold/calc/StrongholdPrediction.java <<'SFEOF'
+          package com.adamarmanyos.stronghold.calc;
+
+          /**
+           * One candidate stronghold location.
+           *
+           * The current triangulation engine only ever produces a single candidate with
+           * confidence 1.0. The field exists so a probabilistic engine can later return a
+           * ranked list without changing the HUD or the rest of the mod.
+           */
+          public final class StrongholdPrediction {
+
+              public final int overworldX;
+              public final int overworldZ;
+              public final double confidence;
+
+              public StrongholdPrediction(int overworldX, int overworldZ, double confidence) {
+                  this.overworldX = overworldX;
+                  this.overworldZ = overworldZ;
+                  this.confidence = confidence;
+              }
+
+              /**
+               * Nether X for this candidate.
+               *
+               * Math.floorDiv is used rather than Java's / operator because integer
+               * division truncates towards zero, which is wrong for negative coordinates:
+               * -1320 / 8 == -165 happens to agree here, but e.g. -1321 / 8 == -165 while
+               * the correct Nether coordinate is -166.
+               */
+              public int netherX() {
+                  return Math.floorDiv(this.overworldX, 8);
+              }
+
+              public int netherZ() {
+                  return Math.floorDiv(this.overworldZ, 8);
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold/calc
+          cat > src/main/java/com/adamarmanyos/stronghold/calc/TriangulationCalculator.java <<'SFEOF'
+          package com.adamarmanyos.stronghold.calc;
+
+          import java.util.List;
+
+          /**
+           * Plain two-ray geometric triangulation.
+           *
+           * This is NOT a Ninjabrain Bot equivalent. It does not model measurement
+           * uncertainty, does not know about stronghold ring placement, does not produce
+           * multiple candidates, and does not rank anything by probability. It simply
+           * intersects the two sight lines and reports where they cross.
+           *
+           * The two most recent measurements are used.
+           */
+          public final class TriangulationCalculator implements StrongholdCalculator {
+
+              /**
+               * Sine of the angle below which the two lines are treated as parallel.
+               * ~0.35 degrees. Below this the intersection point is numerically
+               * meaningless and would be reported hundreds of thousands of blocks away.
+               */
+              private static final double PARALLEL_EPSILON = 0.006D;
+
+              @Override
+              public String name() {
+                  return "two-ray triangulation";
+              }
+
+              @Override
+              public int minimumMeasurements() {
+                  return 2;
+              }
+
+              @Override
+              public Result calculate(List<EyeMeasurement> measurements) {
+                  if (measurements.size() < 2) {
+                      return Result.failure("Need 2 Eye measurements");
+                  }
+
+                  EyeMeasurement a = measurements.get(measurements.size() - 2);
+                  EyeMeasurement b = measurements.get(measurements.size() - 1);
+
+                  double[] da = a.direction();
+                  double[] db = b.direction();
+
+                  // a.pos + t * da  ==  b.pos + s * db
+                  double denominator = (da[0] * db[1]) - (da[1] * db[0]);
+                  if (Math.abs(denominator) < PARALLEL_EPSILON) {
+                      return Result.failure("Angles too similar - move further");
+                  }
+
+                  double dx = b.x - a.x;
+                  double dz = b.z - a.z;
+
+                  double t = ((dx * db[1]) - (dz * db[0])) / denominator;
+                  double s = ((dx * da[1]) - (dz * da[0])) / denominator;
+
+                  if (t <= 0.0D || s <= 0.0D) {
+                      // The crossing point lies behind one of the throws, which means at
+                      // least one angle was captured while looking the wrong way.
+                      return Result.failure("Crossing is behind you - recheck");
+                  }
+
+                  double x = a.x + (t * da[0]);
+                  double z = a.z + (t * da[1]);
+
+                  if (!isFinite(x) || !isFinite(z)) {
+                      return Result.failure("Calculation failed");
+                  }
+
+                  int roundedX = (int) Math.floor(x + 0.5D);
+                  int roundedZ = (int) Math.floor(z + 0.5D);
+
+                  return Result.of(new StrongholdPrediction(roundedX, roundedZ, 1.0D));
+              }
+
+              private static boolean isFinite(double v) {
+                  return !Double.isNaN(v) && !Double.isInfinite(v);
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold/mixin
+          cat > src/main/java/com/adamarmanyos/stronghold/mixin/InGameHudMixin.java <<'SFEOF'
+          package com.adamarmanyos.stronghold.mixin;
+
+          import com.adamarmanyos.stronghold.StrongholdOverlay;
+
+          import net.minecraft.client.gui.hud.InGameHud;
+          import net.minecraft.client.util.math.MatrixStack;
+
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          /**
+           * Draws the stronghold overlay after the vanilla HUD has finished rendering.
+           *
+           * Target verified against Minecraft 1.16.x yarn mappings:
+           *   net.minecraft.client.gui.hud.InGameHud
+           *   public void render(MatrixStack matrices, float tickDelta)
+           * Intermediary equivalent: net.minecraft.class_329#method_1753(Lnet/minecraft/class_4587;F)V
+           *
+           * The descriptor is written out in full in the "method" selector so the
+           * injection cannot silently bind to the wrong overload.
+           */
+          @Mixin(InGameHud.class)
+          public class InGameHudMixin {
+
+              @Inject(
+                  method = "render(Lnet/minecraft/client/util/math/MatrixStack;F)V",
+                  at = @At("TAIL")
+              )
+              private void strongholdfinder$renderOverlay(MatrixStack matrices, float tickDelta, CallbackInfo ci) {
+                  StrongholdOverlay.render(matrices);
+              }
+          }
+          SFEOF
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'SFEOF'
+          {
+            "schemaVersion": 1,
+            "id": "strongholdfinder",
+            "version": "${version}",
+            "name": "Stronghold Finder",
+            "description": "Client-side Eye of Ender triangulation overlay for Minecraft 1.16.1.",
+            "authors": ["Adam Armanyos"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": [
+                "com.adamarmanyos.stronghold.StrongholdFinderClient"
+              ]
+            },
+            "mixins": [
+              "strongholdfinder.mixins.json"
+            ],
+            "depends": {
+              "fabricloader": ">=0.14.0",
+              "minecraft": "1.16.1"
+            }
+          }
+          SFEOF
+          mkdir -p src/main/resources
+          cat > src/main/resources/strongholdfinder.mixins.json <<'SFEOF'
+          {
+            "required": true,
+            "minVersion": "0.8",
+            "package": "com.adamarmanyos.stronghold.mixin",
+            "compatibilityLevel": "JAVA_17",
+            "client": [
+              "InGameHudMixin"
+            ],
+            "injectors": {
+              "defaultRequire": 1
+            }
+          }
+          SFEOF
+          echo '--- files written ---'
+          find . -type f -not -path './.git/*' | sort
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build
+        run: gradle build --stacktrace --no-daemon
+
+      - name: Verify the jar
+        run: |
+          set -e
+          JAR=$(ls build/libs/*.jar | grep -v sources | head -n1)
+          echo "Built: $JAR"
+          unzip -l "$JAR"
+          rm -rf /tmp/check && mkdir -p /tmp/check
+          (cd /tmp/check && unzip -oq "$GITHUB_WORKSPACE/$JAR")
+          echo '--- class file versions (61 = Java 17) ---'
+          for f in $(cd /tmp/check && find . -name '*.class'); do
+            n=${f#./}; n=${n%.class}; n=${n//\//.}
+            echo -n "$n: "
+            javap -verbose -cp /tmp/check "$n" | grep -m1 'major version'
+          done
+          echo '--- mixin annotation table (must say RuntimeInvisibleAnnotations) ---'
+          javap -v -p -cp /tmp/check com.adamarmanyos.stronghold.mixin.InGameHudMixin | grep -i -A4 'Annotations'
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: stronghold-finder-jar
+          path: build/libs/*.jar
