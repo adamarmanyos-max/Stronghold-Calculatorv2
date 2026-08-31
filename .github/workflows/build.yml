@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.0.0
+          mod_version=4.0.1
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -103,12 +103,10 @@ jobs:
           cat > src/main/java/com/adamarmanyos/stronghold/EyeTracker.java <<'SFEOF'
           package com.adamarmanyos.stronghold;
 
-          import java.util.List;
-
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.entity.Entity;
           import net.minecraft.entity.EyeOfEnderEntity;
-          import net.minecraft.util.math.Box;
 
           /**
            * Watches a thrown Eye of Ender and derives the bearing to the stronghold from
@@ -191,37 +189,39 @@ jobs:
                       return;
                   }
 
-                  Box box = new Box(
-                      player.getX() - SEARCH_RADIUS, player.getY() - SEARCH_RADIUS, player.getZ() - SEARCH_RADIUS,
-                      player.getX() + SEARCH_RADIUS, player.getY() + SEARCH_RADIUS, player.getZ() + SEARCH_RADIUS);
-
-                  List<EyeOfEnderEntity> eyes = client.world.getEntitiesByClass(
-                      EyeOfEnderEntity.class, box, entity -> true);
-
-                  if (eyes.isEmpty()) {
-                      return;
-                  }
-
-                  // Stay with the eye already being followed if it is still around,
-                  // otherwise adopt the closest one as a new throw.
+                  // Walk the client's entity list rather than using a box query. The
+                  // box-and-predicate lookup methods moved and changed signature across
+                  // versions; ClientWorld.getEntities() has been stable, and the list is
+                  // short enough that filtering here costs nothing.
                   EyeOfEnderEntity chosen = null;
-                  for (int i = 0; i < eyes.size(); i++) {
-                      if (eyes.get(i).getEntityId() == trackedEntityId) {
-                          chosen = eyes.get(i);
+                  EyeOfEnderEntity nearestEye = null;
+                  double nearestDistance = SEARCH_RADIUS * SEARCH_RADIUS;
+
+                  for (Entity entity : client.world.getEntities()) {
+                      if (!(entity instanceof EyeOfEnderEntity)) {
+                          continue;
+                      }
+
+                      EyeOfEnderEntity eye = (EyeOfEnderEntity) entity;
+
+                      // Stay with the eye already being followed if it is still around.
+                      if (eye.getEntityId() == trackedEntityId) {
+                          chosen = eye;
                           break;
+                      }
+
+                      double distance = eye.squaredDistanceTo(player);
+                      if (distance < nearestDistance) {
+                          nearestDistance = distance;
+                          nearestEye = eye;
                       }
                   }
 
                   if (chosen == null) {
-                      double nearest = Double.MAX_VALUE;
-                      for (int i = 0; i < eyes.size(); i++) {
-                          EyeOfEnderEntity candidate = eyes.get(i);
-                          double distance = candidate.squaredDistanceTo(player);
-                          if (distance < nearest) {
-                              nearest = distance;
-                              chosen = candidate;
-                          }
+                      if (nearestEye == null) {
+                          return;
                       }
+                      chosen = nearestEye;
 
                       trackedEntityId = chosen.getEntityId();
                       originX = chosen.getX();
@@ -739,7 +739,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.0.0";
+              private static final String VERSION = "v4.0.1";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -1148,7 +1148,7 @@ jobs:
                       // by tens of blocks, so it is never left implicit.
                       text(client, matrices, measurement.fromEyeFlight ? "eye" : "aim",
                           left + PADDING, y,
-                          measurement.fromEyeFlight ? COLOR_GOOD : COLOR_LOW);
+                          measurement.fromEyeFlight ? COLOR_HIGH : COLOR_LOW);
 
                       rightAligned(client, matrices, decimals(measurement.x, 2),
                           left + COL_THROW_X_RIGHT, y, COLOR_COORD);
@@ -1156,7 +1156,7 @@ jobs:
                           left + COL_THROW_Z_RIGHT, y, COLOR_COORD);
                       rightAligned(client, matrices, decimals(measurement.yaw, 2),
                           left + COL_THROW_ANGLE_RIGHT, y,
-                          measurement.fromEyeFlight ? COLOR_GOOD : COLOR_NUMBER);
+                          measurement.fromEyeFlight ? COLOR_HIGH : COLOR_NUMBER);
 
                       if (best == null) {
                           rightAligned(client, matrices, "-", left + COL_THROW_ERROR_RIGHT, y, COLOR_NUMBER);
