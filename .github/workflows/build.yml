@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.0.1
+          mod_version=4.1.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -143,16 +143,15 @@ jobs:
               private static final double MIN_TRAVEL = 3.0D;
 
               /**
-               * Flight distance at which the throw is recorded automatically.
+               * Flight distance at which the bearing is good enough to offer.
                *
-               * An eye is only in the air for about a second. Requiring the player to
-               * press a key during that window means the usual habit - throw, watch it,
-               * then press F3+C - silently misses it and falls back to the crosshair
-               * angle, which is the whole error source this class exists to remove. So
-               * the mod records the throw itself as soon as the eye has flown far enough
-               * for a good bearing, and the keypress becomes optional.
+               * The measurement is NOT added at this point. The bearing is simply held
+               * ready, and stays held after the eye has landed or vanished, so the player
+               * can take their time and press F3+C whenever they like without losing the
+               * precision that watching the flight bought. Adding throws is the player's
+               * decision, not the mod's.
                */
-              private static final double AUTO_CAPTURE_TRAVEL = 10.0D;
+              private static final double READY_TRAVEL = 10.0D;
 
               /**
                * Assumed angle error for a tracked eye, in degrees. Dominated by network
@@ -169,11 +168,9 @@ jobs:
               private static boolean tracking;
               private static boolean captured;
 
-              /** Set by the overlay, called when a throw records itself. */
-              private static Runnable autoCaptureListener;
-
-              public static void setAutoCaptureListener(Runnable listener) {
-                  autoCaptureListener = listener;
+              /** True when a bearing is held and waiting for the player to capture it. */
+              public static boolean isReady() {
+                  return tracking && !captured && travelled() >= READY_TRAVEL;
               }
 
               private EyeTracker() {
@@ -232,11 +229,6 @@ jobs:
 
                   latestX = chosen.getX();
                   latestZ = chosen.getZ();
-
-                  if (!captured && travelled() >= AUTO_CAPTURE_TRAVEL && autoCaptureListener != null) {
-                      captured = true;
-                      autoCaptureListener.run();
-                  }
               }
 
               /** True when a tracked eye has flown far enough to give a bearing. */
@@ -739,7 +731,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.0.1";
+              private static final String VERSION = "v4.1.0";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -748,7 +740,6 @@ jobs:
               private static List<StrongholdPrediction> results;
 
               private static boolean hidden;
-              private static boolean autoCaptureHooked;
 
               private static String notice;
               private static long noticeExpiresAt;
@@ -771,11 +762,6 @@ jobs:
                   MinecraftClient client = MinecraftClient.getInstance();
                   if (client == null || client.player == null) {
                       return;
-                  }
-
-                  if (!autoCaptureHooked) {
-                      autoCaptureHooked = true;
-                      EyeTracker.setAutoCaptureListener(StrongholdOverlay::captureFromTrackedEye);
                   }
 
                   EyeTracker.tick(client);
@@ -918,24 +904,11 @@ jobs:
 
               // ----------------------------------------------------------------- state
 
-              /** Called by the tracker the moment a thrown eye has flown far enough. */
-              private static void captureFromTrackedEye() {
-                  if (!EyeTracker.hasBearing()) {
-                      return;
-                  }
-                  record(new EyeMeasurement(
-                      EyeTracker.originX(),
-                      EyeTracker.originZ(),
-                      (float) EyeTracker.bearingDegrees(),
-                      EyeTracker.TRACKED_SIGMA,
-                      true), " tracked over " + decimals(EyeTracker.travelled(), 0) + " blocks");
-              }
-
               private static void capture(ClientPlayerEntity player) {
                   if (EyeTracker.hasBearing() && EyeTracker.isCaptured()) {
-                      // The eye in the air has already recorded itself; pressing the key
-                      // again must not add the same throw twice.
-                      showNotice("Eye already recorded");
+                      // This throw has already been added; pressing the key again must
+                      // not add the same eye twice.
+                      showNotice("That eye is already added");
                       return;
                   }
 
@@ -1023,7 +996,8 @@ jobs:
 
               private static void draw(MinecraftClient client, MatrixStack matrices) {
                   boolean hasContent = !hidden
-                      && (!MEASUREMENTS.isEmpty() || (results != null && !results.isEmpty()));
+                      && (!MEASUREMENTS.isEmpty() || EyeTracker.isReady()
+                          || (results != null && !results.isEmpty()));
 
                   if (hasContent) {
                       drawPanel(client, matrices);
@@ -1058,6 +1032,9 @@ jobs:
                   height += ROW_HEIGHT;                           // "Ender eye throws"
                   height += ROW_HEIGHT;                           // column headers
                   height += MEASUREMENTS.size() * ROW_HEIGHT;
+                  if (EyeTracker.isReady()) {
+                      height += ROW_HEIGHT + 2;
+                  }
                   if (warning() != null) {
                       height += ROW_HEIGHT + 2;
                   }
@@ -1168,6 +1145,14 @@ jobs:
                               left + COL_THROW_ERROR_RIGHT, y, errorColor(error));
                       }
 
+                      y += ROW_HEIGHT;
+                  }
+
+                  if (EyeTracker.isReady()) {
+                      y += 2;
+                      text(client, matrices,
+                          "Eye tracked " + decimals(EyeTracker.travelled(), 0) + " blocks - F3+C to add",
+                          left + PADDING, y, COLOR_HIGH);
                       y += ROW_HEIGHT;
                   }
 
