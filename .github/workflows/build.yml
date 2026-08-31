@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.1.0
+          mod_version=4.2.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -330,6 +330,17 @@ jobs:
 
               private static int sigmaHundredths = DEFAULT_SIGMA;
 
+              /**
+               * Whether the angle comes from the thrown eye's flight path or from where
+               * the player is looking.
+               *
+               * Defaults to the crosshair, which is how Ninjabrain Bot and every external
+               * calculator works: you aim at the eye and the measurement is yours. Eye
+               * tracking is far more precise but takes the measuring out of your hands,
+               * so it is opt-in.
+               */
+              private static boolean trackEyeFlight;
+
               private static int opacityPercent = 100;
               private static int scaleIndex = 2;
               private static boolean loaded;
@@ -364,6 +375,19 @@ jobs:
                   }
                   if (updated != sigmaHundredths) {
                       sigmaHundredths = updated;
+                      save();
+                  }
+              }
+
+              public static boolean trackEyeFlight() {
+                  ensureLoaded();
+                  return trackEyeFlight;
+              }
+
+              public static void setTrackEyeFlight(boolean value) {
+                  ensureLoaded();
+                  if (value != trackEyeFlight) {
+                      trackEyeFlight = value;
                       save();
                   }
               }
@@ -503,6 +527,8 @@ jobs:
                                   scaleIndex = nearestScaleIndex(Integer.parseInt(value));
                               } else if ("sigma".equals(key)) {
                                   sigmaHundredths = clampSigma(Integer.parseInt(value));
+                              } else if ("trackeye".equals(key)) {
+                                  trackEyeFlight = "true".equalsIgnoreCase(value);
                               }
                           }
                       } finally {
@@ -514,6 +540,7 @@ jobs:
                       opacityPercent = 100;
                       scaleIndex = 2;
                       sigmaHundredths = DEFAULT_SIGMA;
+                      trackEyeFlight = false;
                   }
               }
 
@@ -531,6 +558,8 @@ jobs:
                           writer.write("scale=" + SCALE_STEPS[scaleIndex]);
                           writer.newLine();
                           writer.write("sigma=" + sigmaHundredths);
+                          writer.newLine();
+                          writer.write("trackeye=" + trackEyeFlight);
                           writer.newLine();
                       } finally {
                           writer.close();
@@ -731,7 +760,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.1.0";
+              private static final String VERSION = "v4.2.0";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -905,7 +934,9 @@ jobs:
               // ----------------------------------------------------------------- state
 
               private static void capture(ClientPlayerEntity player) {
-                  if (EyeTracker.hasBearing() && EyeTracker.isCaptured()) {
+                  boolean useTracking = StrongholdConfig.trackEyeFlight();
+
+                  if (useTracking && EyeTracker.hasBearing() && EyeTracker.isCaptured()) {
                       // This throw has already been added; pressing the key again must
                       // not add the same eye twice.
                       showNotice("That eye is already added");
@@ -914,7 +945,7 @@ jobs:
 
                   EyeMeasurement measurement;
 
-                  if (EyeTracker.hasBearing()) {
+                  if (useTracking && EyeTracker.hasBearing()) {
                       // Bearing taken from the eye's own flight path: no aiming involved,
                       // so no aiming error. This is the accurate path.
                       measurement = new EyeMeasurement(
@@ -996,7 +1027,8 @@ jobs:
 
               private static void draw(MinecraftClient client, MatrixStack matrices) {
                   boolean hasContent = !hidden
-                      && (!MEASUREMENTS.isEmpty() || EyeTracker.isReady()
+                      && (!MEASUREMENTS.isEmpty()
+                          || (StrongholdConfig.trackEyeFlight() && EyeTracker.isReady())
                           || (results != null && !results.isEmpty()));
 
                   if (hasContent) {
@@ -1032,7 +1064,7 @@ jobs:
                   height += ROW_HEIGHT;                           // "Ender eye throws"
                   height += ROW_HEIGHT;                           // column headers
                   height += MEASUREMENTS.size() * ROW_HEIGHT;
-                  if (EyeTracker.isReady()) {
+                  if (StrongholdConfig.trackEyeFlight() && EyeTracker.isReady()) {
                       height += ROW_HEIGHT + 2;
                   }
                   if (warning() != null) {
@@ -1148,7 +1180,7 @@ jobs:
                       y += ROW_HEIGHT;
                   }
 
-                  if (EyeTracker.isReady()) {
+                  if (StrongholdConfig.trackEyeFlight() && EyeTracker.isReady()) {
                       y += 2;
                       text(client, matrices,
                           "Eye tracked " + decimals(EyeTracker.travelled(), 0) + " blocks - F3+C to add",
@@ -1350,7 +1382,7 @@ jobs:
           public class StrongholdSettingsScreen extends Screen {
 
               private static final int PANEL_WIDTH = 220;
-              private static final int PANEL_HEIGHT = 154;
+              private static final int PANEL_HEIGHT = 186;
 
               private static final int SLIDER_WIDTH = 180;
               private static final int SLIDER_HEIGHT = 16;
@@ -1374,6 +1406,7 @@ jobs:
               private int sizeSliderY;
               private int opacitySliderY;
               private int sigmaSliderY;
+              private int toggleY;
 
               /** Which slider the mouse is currently dragging, or -1. */
               private int dragging = -1;
@@ -1390,6 +1423,7 @@ jobs:
                   this.sizeSliderY = this.panelTop + 38;
                   this.opacitySliderY = this.panelTop + 74;
                   this.sigmaSliderY = this.panelTop + 110;
+                  this.toggleY = this.panelTop + 140;
               }
 
               /** Keeps the world rendering behind the screen instead of pausing. */
@@ -1425,6 +1459,10 @@ jobs:
                   drawSlider(matrices, "Aim error", sigmaText(),
                       sigmaFraction(), this.sigmaSliderY, this.dragging == 2);
 
+                  drawToggle(matrices, "Measure from",
+                      StrongholdConfig.trackEyeFlight() ? "eye flight" : "my crosshair",
+                      this.toggleY);
+
                   centeredText(matrices, "Esc to close", left + (PANEL_WIDTH / 2), bottom - 14, TEXT_DIM);
 
                   super.render(matrices, mouseX, mouseY, delta);
@@ -1457,6 +1495,21 @@ jobs:
               private void centeredText(MatrixStack matrices, String value, int centreX, int y, int color) {
                   int width = this.textRenderer.getWidth(value);
                   this.textRenderer.draw(matrices, value, centreX - (width / 2.0F), y, color);
+              }
+
+              /** A two-state row: label on the left, current choice in a box on the right. */
+              private void drawToggle(MatrixStack matrices, String label, String value, int y) {
+                  int left = this.panelLeft + ((PANEL_WIDTH - SLIDER_WIDTH) / 2);
+
+                  this.textRenderer.draw(matrices, label, left, y + 4, TEXT);
+
+                  int boxWidth = 96;
+                  int boxLeft = left + SLIDER_WIDTH - boxWidth;
+                  DrawableHelper.fill(matrices, boxLeft, y, boxLeft + boxWidth, y + SLIDER_HEIGHT, TRACK);
+
+                  int width = this.textRenderer.getWidth(value);
+                  this.textRenderer.draw(matrices, value,
+                      boxLeft + ((boxWidth - width) / 2.0F), y + 4, TEXT);
               }
 
               private void drawSlider(MatrixStack matrices, String label, String value,
@@ -1551,8 +1604,19 @@ jobs:
                   return fraction;
               }
 
+              private boolean isOnToggle(double mouseX, double mouseY) {
+                  int left = this.panelLeft + ((PANEL_WIDTH - SLIDER_WIDTH) / 2);
+                  return mouseX >= left && mouseX <= left + SLIDER_WIDTH
+                      && mouseY >= this.toggleY && mouseY <= this.toggleY + SLIDER_HEIGHT;
+              }
+
               @Override
               public boolean mouseClicked(double mouseX, double mouseY, int button) {
+                  if (isOnToggle(mouseX, mouseY)) {
+                      StrongholdConfig.setTrackEyeFlight(!StrongholdConfig.trackEyeFlight());
+                      return true;
+                  }
+
                   int slider = sliderAt(mouseX, mouseY);
                   if (slider >= 0) {
                       this.dragging = slider;
