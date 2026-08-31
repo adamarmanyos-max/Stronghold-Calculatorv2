@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.7.0
+          mod_version=4.7.1
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -821,7 +821,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.7.0";
+              private static final String VERSION = "v4.7.1";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -1483,6 +1483,19 @@ jobs:
                                                String value, int rightX, int y, int rgb) {
                   int width = client.textRenderer.getWidth(value);
                   text(client, matrices, value, rightX - width, y, rgb);
+              }
+
+              /**
+               * Wraps a yaw into the (-180, 180] range the F3 screen shows. Minecraft's
+               * raw yaw is unbounded, so a throw can read 212.23 where F3 says -147.77
+               * for the same direction.
+               */
+              private static double wrapYaw(double yaw) {
+                  double wrapped = (yaw + 180.0D) % 360.0D;
+                  if (wrapped < 0.0D) {
+                      wrapped += 360.0D;
+                  }
+                  return wrapped - 180.0D;
               }
 
               /**
