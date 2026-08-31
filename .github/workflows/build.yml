@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=2.9.1
+          mod_version=3.0.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -98,6 +98,152 @@ jobs:
           }
 
           rootProject.name = 'stronghold-finder'
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/EyeTracker.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import java.util.List;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.entity.EyeOfEnderEntity;
+          import net.minecraft.util.math.Box;
+
+          /**
+           * Watches a thrown Eye of Ender and derives the bearing to the stronghold from
+           * its flight path instead of from where the player was looking.
+           *
+           * This is the one thing an in-game mod can do that an external calculator
+           * cannot. Ninjabrain Bot only sees the number F3+C puts on the clipboard, so
+           * its whole error model exists to cope with a human aiming a crosshair at a
+           * small moving object - that error is typically 0.05 to 0.3 degrees and it
+           * dominates everything else. The eye entity itself is already flying at the
+           * stronghold, so sampling where it actually goes removes the human from the
+           * measurement completely.
+           *
+           * Method: remember where the eye first appeared, then measure the horizontal
+           * displacement to its latest position. The eye's horizontal heading is constant
+           * for the whole flight - vanilla steers it toward a waypoint placed exactly
+           * along the line to the structure - so that displacement is the bearing.
+           *
+           * Precision is set by how finely entity positions arrive over the network,
+           * which is 1/4096 of a block. Over ten ticks of flight the eye covers about
+           * 12 blocks, giving roughly 0.001 degrees - some fifty times better than
+           * careful manual aiming.
+           *
+           * UNVERIFIED: this has not been tested in a running game. If the eye is not
+           * found or has not flown far enough, capture falls back to player yaw, which
+           * is what every earlier version used.
+           */
+          public final class EyeTracker {
+
+              /** How far from the player to look for a thrown eye. */
+              private static final double SEARCH_RADIUS = 72.0D;
+
+              /** Minimum flight distance before the bearing is trusted. */
+              private static final double MIN_TRAVEL = 3.0D;
+
+              /**
+               * Assumed angle error for a tracked eye, in degrees. Dominated by network
+               * position quantisation rather than anything human.
+               */
+              public static final double TRACKED_SIGMA = 0.005D;
+
+              private static int trackedEntityId = -1;
+
+              private static double originX;
+              private static double originZ;
+              private static double latestX;
+              private static double latestZ;
+              private static boolean tracking;
+
+              private EyeTracker() {
+              }
+
+              /**
+               * Called once per frame. Picks up a thrown eye, keeps following the same
+               * one, and forgets it once it is gone.
+               */
+              public static void tick(MinecraftClient client) {
+                  ClientPlayerEntity player = client.player;
+                  if (player == null || client.world == null) {
+                      return;
+                  }
+
+                  Box box = new Box(
+                      player.getX() - SEARCH_RADIUS, player.getY() - SEARCH_RADIUS, player.getZ() - SEARCH_RADIUS,
+                      player.getX() + SEARCH_RADIUS, player.getY() + SEARCH_RADIUS, player.getZ() + SEARCH_RADIUS);
+
+                  List<EyeOfEnderEntity> eyes = client.world.getEntitiesByClass(
+                      EyeOfEnderEntity.class, box, entity -> true);
+
+                  if (eyes.isEmpty()) {
+                      return;
+                  }
+
+                  // Stay with the eye already being followed if it is still around,
+                  // otherwise adopt the closest one as a new throw.
+                  EyeOfEnderEntity chosen = null;
+                  for (int i = 0; i < eyes.size(); i++) {
+                      if (eyes.get(i).getEntityId() == trackedEntityId) {
+                          chosen = eyes.get(i);
+                          break;
+                      }
+                  }
+
+                  if (chosen == null) {
+                      double nearest = Double.MAX_VALUE;
+                      for (int i = 0; i < eyes.size(); i++) {
+                          EyeOfEnderEntity candidate = eyes.get(i);
+                          double distance = candidate.squaredDistanceTo(player);
+                          if (distance < nearest) {
+                              nearest = distance;
+                              chosen = candidate;
+                          }
+                      }
+
+                      trackedEntityId = chosen.getEntityId();
+                      originX = chosen.getX();
+                      originZ = chosen.getZ();
+                      tracking = true;
+                  }
+
+                  latestX = chosen.getX();
+                  latestZ = chosen.getZ();
+              }
+
+              /** True when a tracked eye has flown far enough to give a bearing. */
+              public static boolean hasBearing() {
+                  return tracking && travelled() >= MIN_TRAVEL;
+              }
+
+              public static double travelled() {
+                  return Math.hypot(latestX - originX, latestZ - originZ);
+              }
+
+              /**
+               * Bearing of the eye's flight, in Minecraft yaw degrees, so it can be used
+               * interchangeably with a player yaw measurement.
+               */
+              public static double bearingDegrees() {
+                  return Math.toDegrees(Math.atan2(-(latestX - originX), latestZ - originZ));
+              }
+
+              /** Where the eye was thrown from. */
+              public static double originX() {
+                  return originX;
+              }
+
+              public static double originZ() {
+                  return originZ;
+              }
+
+              public static void forget() {
+                  trackedEntityId = -1;
+                  tracking = false;
+              }
+          }
           SFEOF
           mkdir -p src/main/java/com/adamarmanyos/stronghold
           cat > src/main/java/com/adamarmanyos/stronghold/StrongholdConfig.java <<'SFEOF'
@@ -557,7 +703,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v2.9.1";
+              private static final String VERSION = "v3.0.0";
 
               private static final StrongholdCalculator CALCULATOR = new RingStrongholdCalculator();
 
@@ -590,6 +736,7 @@ jobs:
                       return;
                   }
 
+                  EyeTracker.tick(client);
                   pollKeys(client);
 
                   float scale = StrongholdConfig.scaleFactor();
@@ -730,10 +877,43 @@ jobs:
               // ----------------------------------------------------------------- state
 
               private static void capture(ClientPlayerEntity player) {
-                  // In 1.16.1 yaw is a public field on Entity; there is no getYaw()
-                  // accessor on this version.
-                  MEASUREMENTS.add(new EyeMeasurement(player.getX(), player.getZ(), player.yaw));
+                  EyeMeasurement measurement;
+
+                  if (EyeTracker.hasBearing()) {
+                      // Bearing taken from the eye's own flight path: no aiming involved,
+                      // so no aiming error. This is the accurate path.
+                      measurement = new EyeMeasurement(
+                          EyeTracker.originX(),
+                          EyeTracker.originZ(),
+                          (float) EyeTracker.bearingDegrees(),
+                          EyeTracker.TRACKED_SIGMA,
+                          true);
+                  } else {
+                      // No eye in flight, or it has not travelled far enough yet. Fall
+                      // back to where the player is looking, which is what an external
+                      // calculator has to use. In 1.16.1 yaw is a public field on Entity;
+                      // there is no getYaw() accessor on this version.
+                      measurement = new EyeMeasurement(
+                          player.getX(),
+                          player.getZ(),
+                          player.yaw,
+                          StrongholdConfig.angleSigma(),
+                          false);
+                  }
+
+                  // Read the flight distance before forgetting the eye, not after.
+                  String detail = measurement.fromEyeFlight
+                      ? (" tracked over " + decimals(EyeTracker.travelled(), 0) + " blocks")
+                      : " from crosshair - less accurate";
+
+                  MEASUREMENTS.add(measurement);
                   hidden = false;
+
+                  // Release the eye so the next throw is picked up as a new one rather
+                  // than continuing this track.
+                  EyeTracker.forget();
+
+                  showNotice("Eye " + MEASUREMENTS.size() + detail);
 
                   while (MEASUREMENTS.size() > MAX_MEASUREMENTS) {
                       // Third and later measurements replace the oldest one.
@@ -768,6 +948,7 @@ jobs:
                   results = null;
                   notice = null;
                   hidden = false;
+                  EyeTracker.forget();
               }
 
               private static void showNotice(String text) {
@@ -903,7 +1084,8 @@ jobs:
                       rightAligned(client, matrices, decimals(measurement.z, 2),
                           left + COL_THROW_Z_RIGHT, y, COLOR_COORD);
                       rightAligned(client, matrices, decimals(measurement.yaw, 2),
-                          left + COL_THROW_ANGLE_RIGHT, y, COLOR_NUMBER);
+                          left + COL_THROW_ANGLE_RIGHT, y,
+                          measurement.fromEyeFlight ? COLOR_GOOD : COLOR_NUMBER);
 
                       if (best == null) {
                           rightAligned(client, matrices, "-", left + COL_THROW_ERROR_RIGHT, y, COLOR_NUMBER);
@@ -947,7 +1129,7 @@ jobs:
                   double chiSquare = 0.0D;
                   for (int i = 0; i < MEASUREMENTS.size(); i++) {
                       double error = angleError(MEASUREMENTS.get(i), best);
-                      double scaled = error / StrongholdConfig.angleSigma();
+                      double scaled = error / MEASUREMENTS.get(i).sigma;
                       chiSquare += scaled * scaled;
                       if (Math.abs(error) > worst) {
                           worst = Math.abs(error);
@@ -1367,10 +1549,24 @@ jobs:
               public final double z;
               public final float yaw;
 
-              public EyeMeasurement(double x, double z, float yaw) {
+              /**
+               * Assumed standard deviation of THIS measurement's angle, in degrees.
+               *
+               * Per measurement rather than global because the two ways of taking one are
+               * not comparable: a bearing read off the eye's own flight path is roughly
+               * fifty times more precise than a human aiming a crosshair at it.
+               */
+              public final double sigma;
+
+              /** True when the angle came from the eye's flight rather than player yaw. */
+              public final boolean fromEyeFlight;
+
+              public EyeMeasurement(double x, double z, float yaw, double sigma, boolean fromEyeFlight) {
                   this.x = x;
                   this.z = z;
                   this.yaw = yaw;
+                  this.sigma = sigma;
+                  this.fromEyeFlight = fromEyeFlight;
               }
 
               /**
@@ -1713,6 +1909,10 @@ jobs:
               private static final double FINE_STEP = 4.0D;
               private static final double REFINE_STEP = 2.0D;
 
+              /** Second refinement pass, fine enough for a tracked-eye posterior. */
+              private static final double FINAL_HALF_WIDTH = 8.0D;
+              private static final double FINAL_STEP = 0.25D;
+
               /**
                * Cells whose angle is further than this many sigma from a measurement
                * contribute a factor of about exp(-18) and are skipped. Almost every cell
@@ -1762,7 +1962,6 @@ jobs:
 
                   // Pass one: log likelihood of every cell, tracking the maximum so the
                   // exponential below cannot underflow to zero everywhere.
-                  double cutoff = MAX_RESIDUAL_SIGMAS * sigma();
                   double maxLog = Double.NEGATIVE_INFINITY;
 
                   for (int i = 0; i < cells; i++) {
@@ -1771,16 +1970,28 @@ jobs:
 
                       for (int m = 0; m < measurements.size(); m++) {
                           EyeMeasurement measurement = measurements.get(m);
-                          double predicted = Math.toDegrees(Math.atan2(
-                              -(gridX[i] - measurement.x), gridZ[i] - measurement.z));
+                          double dx = gridX[i] - measurement.x;
+                          double dz = gridZ[i] - measurement.z;
+                          double predicted = Math.toDegrees(Math.atan2(-dx, dz));
                           double residualDegrees = wrapDegrees(predicted - measurement.yaw);
 
-                          if (Math.abs(residualDegrees) > cutoff) {
+                          // Effective sigma for the coarse pass. A tracked eye has an
+                          // error of about 0.005 degrees, which at 2000 blocks is a
+                          // corridor a single block wide - narrower than the 24 block
+                          // grid, so every cell would fall outside it and the search
+                          // would report that no stronghold fits. Widening sigma to the
+                          // angular size of a grid cell keeps the coarse pass meaningful;
+                          // the refinement below uses the true sigma.
+                          double distance = Math.max(Math.sqrt((dx * dx) + (dz * dz)), 1.0D);
+                          double gridAngle = Math.toDegrees(GRID_RADIAL_STEP / distance);
+                          double effectiveSigma = Math.max(measurement.sigma, 0.5D * gridAngle);
+
+                          if (Math.abs(residualDegrees) > (MAX_RESIDUAL_SIGMAS * effectiveSigma)) {
                               plausible = false;
                               break;
                           }
 
-                          double residual = residualDegrees / sigma();
+                          double residual = residualDegrees / effectiveSigma;
                           logLikelihood -= 0.5D * residual * residual;
                       }
 
@@ -1882,9 +2093,16 @@ jobs:
                           radius90 = fineRadius(measurements, refined[0], refined[1]);
                       }
 
+                      // Chunk snapping. A stronghold does not sit at an arbitrary
+                      // coordinate: generation places it in one chunk, and the starter
+                      // staircase sits at (4, 4) within that chunk. Snapping the
+                      // continuous estimate onto that grid is free accuracy whenever the
+                      // estimate is already inside the right chunk, and it is what makes
+                      // "go to these coordinates" land on the staircase rather than
+                      // somewhere in the surrounding rubble.
                       candidates.add(new StrongholdPrediction(
-                          (int) Math.floor(refined[0] + 0.5D),
-                          (int) Math.floor(refined[1] + 0.5D),
+                          staircaseCoordinate(refined[0]),
+                          staircaseCoordinate(refined[1]),
                           radius90,
                           crossing,
                           applyFitPenalty(certainty, measurements, refined[0], refined[1])));
@@ -1903,28 +2121,37 @@ jobs:
                * centroid, which recovers the precision the coarse grid threw away.
                */
               private static double[] refine(List<EyeMeasurement> measurements, double cx, double cz) {
+                  double[] point = refineOnce(measurements, cx, cz, REFINE_HALF_WIDTH, REFINE_STEP);
+                  // Second, much finer pass. With a tracked eye the posterior is under a
+                  // block wide, so a 2 block grid would throw away most of the precision
+                  // that made tracking worth doing.
+                  return refineOnce(measurements, point[0], point[1], FINAL_HALF_WIDTH, FINAL_STEP);
+              }
+
+              private static double[] refineOnce(List<EyeMeasurement> measurements, double cx, double cz,
+                                                 double halfWidth, double step) {
                   double sumWeight = 0.0D;
                   double sumX = 0.0D;
                   double sumZ = 0.0D;
                   double best = Double.NEGATIVE_INFINITY;
 
-                  int steps = (int) ((2.0D * REFINE_HALF_WIDTH) / REFINE_STEP) + 1;
+                  int steps = (int) ((2.0D * halfWidth) / step) + 1;
                   double[] logs = new double[steps * steps];
                   double[] xs = new double[steps * steps];
                   double[] zs = new double[steps * steps];
 
                   int n = 0;
                   for (int ix = 0; ix < steps; ix++) {
-                      double x = cx - REFINE_HALF_WIDTH + (ix * REFINE_STEP);
+                      double x = cx - halfWidth + (ix * step);
                       for (int iz = 0; iz < steps; iz++) {
-                          double z = cz - REFINE_HALF_WIDTH + (iz * REFINE_STEP);
+                          double z = cz - halfWidth + (iz * step);
 
                           double logLikelihood = 0.0D;
                           for (int m = 0; m < measurements.size(); m++) {
                               EyeMeasurement measurement = measurements.get(m);
                               double predicted = Math.toDegrees(Math.atan2(
                                   -(x - measurement.x), z - measurement.z));
-                              double residual = wrapDegrees(predicted - measurement.yaw) / sigma();
+                              double residual = wrapDegrees(predicted - measurement.yaw) / measurement.sigma;
                               logLikelihood -= 0.5D * residual * residual;
                           }
 
@@ -1991,7 +2218,7 @@ jobs:
                               EyeMeasurement measurement = measurements.get(m);
                               double predicted = Math.toDegrees(Math.atan2(
                                   -(x - measurement.x), z - measurement.z));
-                              double residual = wrapDegrees(predicted - measurement.yaw) / sigma();
+                              double residual = wrapDegrees(predicted - measurement.yaw) / measurement.sigma;
                               logLikelihood -= 0.5D * residual * residual;
                           }
 
@@ -2053,7 +2280,7 @@ jobs:
                       EyeMeasurement measurement = measurements.get(i);
                       double predicted = Math.toDegrees(Math.atan2(
                           -(x - measurement.x), z - measurement.z));
-                      double residual = wrapDegrees(predicted - measurement.yaw) / sigma();
+                      double residual = wrapDegrees(predicted - measurement.yaw) / measurement.sigma;
                       chiSquare += residual * residual;
                   }
 
@@ -2062,6 +2289,15 @@ jobs:
                       return certainty;
                   }
                   return certainty * Math.exp(-FIT_PENALTY_SCALE * excess);
+              }
+
+              /**
+               * Snaps a continuous coordinate onto the starter staircase of the chunk it
+               * falls in - chunk index times 16, plus 4.
+               */
+              private static int staircaseCoordinate(double value) {
+                  int chunk = (int) Math.floor(value / 16.0D);
+                  return (chunk * 16) + 4;
               }
 
               /** Wrap a degree difference into (-180, 180]. */
