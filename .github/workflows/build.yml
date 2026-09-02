@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.7.1
+          mod_version=4.8.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -732,6 +732,7 @@ jobs:
               private static final int KEY_SETTINGS = GLFW.GLFW_KEY_PERIOD;
               private static final int KEY_MEASURE_MODE = GLFW.GLFW_KEY_M;
               private static final int KEY_CALIBRATE = GLFW.GLFW_KEY_K;
+              private static final int KEY_TELEPORT = GLFW.GLFW_KEY_P;
 
               // Measuring view: narrow FOV and the slowest mouse, so a pixel of movement
               // covers the least angle and the crosshair can be put exactly on the eye.
@@ -747,8 +748,18 @@ jobs:
               private static final double TRAVEL_FOV = 110.0D;
               private static final double TRAVEL_SENSITIVITY = 0.4D;
 
-              /** FOV below this counts as already being in measuring view. */
-              private static final double MEASURE_FOV_THRESHOLD = 70.0D;
+              /**
+               * Sensitivity below this counts as already being in measuring view. It is
+               * the midpoint of the two settings, so 50% on the options slider.
+               *
+               * The direction of the swap is decided by SENSITIVITY, not FOV. Changing
+               * FOV in the pause menu is a common habit, and keying off FOV meant a
+               * half-changed state - slow mouse but wide FOV - would be read as "you are
+               * measuring" and push FOV back down, undoing what you just did. Sensitivity
+               * is the setting nobody changes by hand mid-run, so it is the reliable
+               * indicator of which view you are actually in.
+               */
+              private static final double MEASURE_SENSITIVITY_THRESHOLD = 0.25D;
               private static final int KEY_RESET = GLFW.GLFW_KEY_B;
               private static final int KEY_FADE = GLFW.GLFW_KEY_LEFT_BRACKET;
               private static final int KEY_BRIGHTEN = GLFW.GLFW_KEY_RIGHT_BRACKET;
@@ -821,7 +832,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.7.1";
+              private static final String VERSION = "v4.8.0";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -841,6 +852,7 @@ jobs:
               private static boolean prevSettings;
               private static boolean prevMeasureMode;
               private static boolean prevCalibrate;
+              private static boolean prevTeleport;
               private static boolean prevReset;
               private static boolean prevFade;
               private static boolean prevBrighten;
@@ -897,6 +909,7 @@ jobs:
                       prevSettings = false;
                       prevMeasureMode = false;
                       prevCalibrate = false;
+                      prevTeleport = false;
                       prevReset = false;
                       prevFade = false;
                       prevBrighten = false;
@@ -913,6 +926,7 @@ jobs:
                   boolean settings = !modifier && InputUtil.isKeyPressed(window, KEY_SETTINGS);
                   boolean measureMode = !modifier && InputUtil.isKeyPressed(window, KEY_MEASURE_MODE);
                   boolean calibrate = !modifier && InputUtil.isKeyPressed(window, KEY_CALIBRATE);
+                  boolean teleport = !modifier && InputUtil.isKeyPressed(window, KEY_TELEPORT);
                   boolean reset = !modifier && InputUtil.isKeyPressed(window, KEY_RESET);
                   boolean fade = !modifier && InputUtil.isKeyPressed(window, KEY_FADE);
                   boolean brighten = !modifier && InputUtil.isKeyPressed(window, KEY_BRIGHTEN);
@@ -937,6 +951,9 @@ jobs:
                   if (calibrate && !prevCalibrate) {
                       calibrateHere(client.player);
                   }
+                  if (teleport && !prevTeleport) {
+                      teleportToPrediction(client.player);
+                  }
                   if (reset && !prevReset) {
                       reset();
                   }
@@ -959,6 +976,7 @@ jobs:
                   prevSettings = settings;
                   prevMeasureMode = measureMode;
                   prevCalibrate = calibrate;
+                  prevTeleport = teleport;
                   prevReset = reset;
                   prevFade = fade;
                   prevBrighten = brighten;
@@ -984,20 +1002,56 @@ jobs:
                       return;
                   }
 
-                  boolean measuring = options.fov <= MEASURE_FOV_THRESHOLD;
+                  boolean measuring = options.mouseSensitivity <= MEASURE_SENSITIVITY_THRESHOLD;
 
                   if (measuring) {
+                      // Going to travel view. Both values are written, so if FOV was
+                      // already changed by hand this simply completes the state instead
+                      // of fighting it.
                       options.fov = TRAVEL_FOV;
                       options.mouseSensitivity = TRAVEL_SENSITIVITY;
                       showNotice("Travel: FOV 110, sens 80%");
                   } else {
                       options.fov = MEASURE_FOV;
                       options.mouseSensitivity = MEASURE_SENSITIVITY;
-                      showNotice("Measure: FOV 30, sens 0%");
+                      showNotice("Measure: FOV 30, slow mouse");
                   }
 
                   // Persist, so the setting survives a restart like any options change.
                   options.write();
+              }
+
+              /**
+               * Teleports to the top prediction, for testing in creative.
+               *
+               * This sends the ordinary /tp command as if typed into chat, so it obeys
+               * exactly the same permissions any player has: it needs cheats enabled, or
+               * operator on a server. The mod cannot move the player by itself and does
+               * not try to - a client-side mod that repositioned you directly would be
+               * desynced from the server the moment it did.
+               *
+               * Gated on creative because this is a testing convenience, not a way to
+               * skip the walk in a survival run.
+               */
+              private static void teleportToPrediction(ClientPlayerEntity player) {
+                  if (results == null || results.isEmpty()) {
+                      showNotice("Nothing to teleport to");
+                      return;
+                  }
+                  if (!player.isCreative()) {
+                      showNotice("Teleport needs creative mode");
+                      return;
+                  }
+
+                  StrongholdPrediction best = results.get(0);
+
+                  // Y is kept as it is: the stronghold's depth is not something the
+                  // calculation knows, and in creative you can simply fly down.
+                  String command = "/tp @s " + best.overworldX + " "
+                      + Math.round(player.getY()) + " " + best.overworldZ;
+
+                  player.sendChatMessage(command);
+                  showNotice("Teleporting to " + best.overworldX + ", " + best.overworldZ);
               }
 
               /**
