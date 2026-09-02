@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.9.0
+          mod_version=4.9.1
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -109,8 +109,13 @@ jobs:
           import net.minecraft.client.network.ClientPlayerEntity;
 
           /**
-           * Sets up a blind-travel practice scenario: survival mode, a stack of eyes, and
-           * a drop somewhere plausible to triangulate from.
+           * Sets up a blind-travel practice scenario: creative mode, one eye, one pearl,
+           * and a drop somewhere plausible to triangulate from.
+           *
+           * Creative on purpose. Neither an Eye of Ender nor an Ender Pearl is consumed
+           * in creative - both items only decrement the stack when the user is not in
+           * creative mode - so a single one of each lasts the whole session. That also
+           * means practice never stalls because you ran out of eyes mid-attempt.
            *
            * Everything is done with ordinary commands sent as if typed into chat, so it
            * needs cheats enabled. A client-side mod cannot change gamemode, grant items or
@@ -126,8 +131,9 @@ jobs:
            */
           public final class BlindPractice {
 
-              /** Eyes handed out. Enough for several throws plus mistakes. */
-              private static final int EYE_COUNT = 16;
+              /** One of each is enough: creative does not consume either item. */
+              private static final int EYE_COUNT = 1;
+              private static final int PEARL_COUNT = 1;
 
               /**
                * Distance band from the world origin to be dropped in, in blocks.
@@ -163,8 +169,12 @@ jobs:
 
                   attempts = 0;
 
-                  player.sendChatMessage("/gamemode survival");
+                  player.sendChatMessage("/gamemode creative");
                   player.sendChatMessage("/give @s minecraft:ender_eye " + EYE_COUNT);
+
+                  // A pearl to cover ground between throws, which is otherwise the slow
+                  // part of a practice run.
+                  player.sendChatMessage("/give @s minecraft:ender_pearl " + PEARL_COUNT);
 
                   drop(player);
               }
@@ -951,7 +961,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.9.0";
+              private static final String VERSION = "v4.9.1";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
