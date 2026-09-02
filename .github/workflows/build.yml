@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=4.8.0
+          mod_version=4.9.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -98,6 +98,125 @@ jobs:
           }
 
           rootProject.name = 'stronghold-finder'
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/BlindPractice.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import java.util.Random;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+
+          /**
+           * Sets up a blind-travel practice scenario: survival mode, a stack of eyes, and
+           * a drop somewhere plausible to triangulate from.
+           *
+           * Everything is done with ordinary commands sent as if typed into chat, so it
+           * needs cheats enabled. A client-side mod cannot change gamemode, grant items or
+           * move the player by itself, and faking any of it locally would desync from the
+           * server on the next tick.
+           *
+           * Placement uses /spreadplayers rather than a raw /tp. That command puts the
+           * player on the surface at a safe spot, which solves burying them inside terrain
+           * without the mod needing to inspect chunks it has not loaded. Water is not
+           * something spreadplayers avoids, so an ocean landing is detected afterwards -
+           * once the chunk is actually loaded and the block under the player is known -
+           * and the drop is retried somewhere else.
+           */
+          public final class BlindPractice {
+
+              /** Eyes handed out. Enough for several throws plus mistakes. */
+              private static final int EYE_COUNT = 16;
+
+              /**
+               * Distance band from the world origin to be dropped in, in blocks.
+               *
+               * Chosen to sit around the inner part of the first stronghold ring, which
+               * is roughly where a blind travel leaves you: far enough out that the
+               * stronghold is a real triangulation problem, close enough that it is not a
+               * marathon.
+               */
+              private static final double MIN_RADIUS = 800.0D;
+              private static final double MAX_RADIUS = 2200.0D;
+
+              private static final int MAX_ATTEMPTS = 8;
+
+              /** How long to let the chunk load before judging where we landed. */
+              private static final long SETTLE_MILLIS = 1500L;
+
+              private static final Random RANDOM = new Random();
+
+              private static boolean waiting;
+              private static long checkAt;
+              private static int attempts;
+
+              private BlindPractice() {
+              }
+
+              /** Puts the player into survival with eyes, then drops them somewhere. */
+              public static void start(MinecraftClient client) {
+                  ClientPlayerEntity player = client.player;
+                  if (player == null) {
+                      return;
+                  }
+
+                  attempts = 0;
+
+                  player.sendChatMessage("/gamemode survival");
+                  player.sendChatMessage("/give @s minecraft:ender_eye " + EYE_COUNT);
+
+                  drop(player);
+              }
+
+              private static void drop(ClientPlayerEntity player) {
+                  attempts++;
+
+                  double angle = RANDOM.nextDouble() * 2.0D * Math.PI;
+                  double radius = MIN_RADIUS + (RANDOM.nextDouble() * (MAX_RADIUS - MIN_RADIUS));
+
+                  long x = Math.round(radius * Math.cos(angle));
+                  long z = Math.round(radius * Math.sin(angle));
+
+                  // spreadplayers <x> <z> <spreadDistance> <maxRange> <respectTeams>
+                  // <targets>. A max range barely above the spread distance keeps the
+                  // landing close to the point asked for, while the command still does
+                  // the work of finding a safe surface block.
+                  player.sendChatMessage("/spreadplayers " + x + " " + z + " 0 8 false @s");
+
+                  waiting = true;
+                  checkAt = System.currentTimeMillis() + SETTLE_MILLIS;
+              }
+
+              /** Called each frame; checks where the drop actually landed. */
+              public static void tick(MinecraftClient client) {
+                  if (!waiting || System.currentTimeMillis() < checkAt) {
+                      return;
+                  }
+
+                  ClientPlayerEntity player = client.player;
+                  if (player == null) {
+                      waiting = false;
+                      return;
+                  }
+
+                  if (player.isTouchingWater()) {
+                      if (attempts < MAX_ATTEMPTS) {
+                          StrongholdOverlay.notice("Landed in water, moving...");
+                          drop(player);
+                          return;
+                      }
+                      StrongholdOverlay.notice("Gave up avoiding water after "
+                          + attempts + " tries");
+                      waiting = false;
+                      return;
+                  }
+
+                  waiting = false;
+                  StrongholdOverlay.notice("Blind practice: "
+                      + Math.round(player.getX()) + ", " + Math.round(player.getZ()));
+              }
+          }
           SFEOF
           mkdir -p src/main/java/com/adamarmanyos/stronghold
           cat > src/main/java/com/adamarmanyos/stronghold/EyeTracker.java <<'SFEOF'
@@ -832,7 +951,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v4.8.0";
+              private static final String VERSION = "v4.9.0";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -869,6 +988,7 @@ jobs:
                   }
 
                   EyeTracker.tick(client);
+                  BlindPractice.tick(client);
                   pollKeys(client);
 
                   float scale = StrongholdConfig.scaleFactor();
@@ -1187,6 +1307,11 @@ jobs:
                   notice = null;
                   hidden = false;
                   EyeTracker.forget();
+              }
+
+              /** Lets other parts of the mod post a message to the HUD. */
+              public static void notice(String text) {
+                  showNotice(text);
               }
 
               private static void showNotice(String text) {
@@ -1586,6 +1711,7 @@ jobs:
           cat > src/main/java/com/adamarmanyos/stronghold/StrongholdSettingsScreen.java <<'SFEOF'
           package com.adamarmanyos.stronghold;
 
+          import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.gui.DrawableHelper;
           import net.minecraft.client.gui.screen.Screen;
           import net.minecraft.client.util.math.MatrixStack;
@@ -1606,7 +1732,7 @@ jobs:
           public class StrongholdSettingsScreen extends Screen {
 
               private static final int PANEL_WIDTH = 220;
-              private static final int PANEL_HEIGHT = 214;
+              private static final int PANEL_HEIGHT = 242;
 
               private static final int SLIDER_WIDTH = 180;
               private static final int SLIDER_HEIGHT = 16;
@@ -1632,6 +1758,7 @@ jobs:
               private int sigmaSliderY;
               private int toggleY;
               private int calibrationY;
+              private int practiceY;
 
               /** Which slider the mouse is currently dragging, or -1. */
               private int dragging = -1;
@@ -1650,6 +1777,7 @@ jobs:
                   this.sigmaSliderY = this.panelTop + 110;
                   this.toggleY = this.panelTop + 140;
                   this.calibrationY = this.panelTop + 168;
+                  this.practiceY = this.panelTop + 196;
               }
 
               /** Keeps the world rendering behind the screen instead of pausing. */
@@ -1693,6 +1821,8 @@ jobs:
                   drawToggle(matrices, "Calibration",
                       samples == 0 ? "none - press K" : (samples + " throws (reset)"),
                       this.calibrationY);
+
+                  drawToggle(matrices, "Blind practice", "start (needs cheats)", this.practiceY);
 
                   centeredText(matrices, "Esc to close", left + (PANEL_WIDTH / 2), bottom - 14, TEXT_DIM);
 
@@ -1850,6 +1980,19 @@ jobs:
 
                   if (isOnRow(mouseX, mouseY, this.calibrationY)) {
                       StrongholdConfig.resetCalibration();
+                      return true;
+                  }
+
+                  if (isOnRow(mouseX, mouseY, this.practiceY)) {
+                      // Close first: the commands need to reach the server, and watching
+                      // the drop happen is the point.
+                      //
+                      // MinecraftClient.getInstance() rather than Screen's own client
+                      // field, whose name has moved around between versions. This call is
+                      // already used elsewhere in the mod and is known to compile here.
+                      MinecraftClient screenClient = MinecraftClient.getInstance();
+                      screenClient.openScreen(null);
+                      BlindPractice.start(screenClient);
                       return true;
                   }
 
