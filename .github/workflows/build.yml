@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=5.0.0
+          mod_version=6.0.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -225,128 +225,6 @@ jobs:
                   waiting = false;
                   StrongholdOverlay.notice("Blind practice: "
                       + Math.round(player.getX()) + ", " + Math.round(player.getZ()));
-              }
-          }
-          SFEOF
-          mkdir -p src/main/java/com/adamarmanyos/stronghold
-          cat > src/main/java/com/adamarmanyos/stronghold/BoatMeasurement.java <<'SFEOF'
-          package com.adamarmanyos.stronghold;
-
-          import net.minecraft.client.MinecraftClient;
-          import net.minecraft.client.network.ClientPlayerEntity;
-          import net.minecraft.entity.Entity;
-          import net.minecraft.entity.vehicle.BoatEntity;
-
-          /**
-           * Boat measurement: snapping a measured yaw onto the discrete lattice of angles
-           * the game can actually produce.
-           *
-           * Your yaw does not move continuously. Mouse movement changes it in whole steps
-           * of
-           *
-           *   minInc = ((sensitivity * 0.6 + 0.2)^3 * 8) * 0.15   degrees
-           *
-           * which is about 0.23 degrees at 100% sensitivity. The crosshair physically
-           * cannot land between two steps, so a measurement is normally uncertain by up
-           * to half a step and there is no way to tell where in that gap you are.
-           *
-           * A boat's yaw is quantised to multiples of 360/256 = 1.40625 degrees, and
-           * sitting in one ties your yaw to that known value. Once the anchor is known,
-           * every reachable angle is anchor + k * minInc for integer k, so a reading can
-           * be snapped onto the lattice and the quantisation uncertainty disappears.
-           *
-           * SELF-VALIDATION. Rather than assume how the anchor gets established - whether
-           * entering the boat sets your yaw, or turning it drags your view along - this
-           * checks whether the current yaw is actually consistent with the lattice. If
-           * the reading sits close to a lattice point the anchor is trustworthy and boat
-           * precision is claimed; if it sits somewhere in between, the lattice is wrong
-           * and the throw falls back to an ordinary measurement. That way a stale or
-           * mistaken anchor produces a normal-accuracy throw rather than a confidently
-           * wrong one.
-           */
-          public final class BoatMeasurement {
-
-              /** Angle error assumed for a snapped boat throw, in degrees. */
-              public static final double BOAT_SIGMA = 0.001D;
-
-              /** A boat's yaw is a byte, so it moves in steps of 360/256. */
-              private static final double BOAT_YAW_STEP = 360.0D / 256.0D;
-
-              /**
-               * How close to a lattice point the yaw must sit, as a fraction of one step,
-               * for the anchor to be trusted.
-               */
-              private static final double ALIGNMENT_TOLERANCE = 0.25D;
-
-              private static boolean inBoat;
-              private static double anchor;
-
-              private BoatMeasurement() {
-              }
-
-              /** Called each frame. Tracks the boat the player is riding, if any. */
-              public static void tick(MinecraftClient client) {
-                  ClientPlayerEntity player = client.player;
-                  if (player == null) {
-                      inBoat = false;
-                      return;
-                  }
-
-                  Entity vehicle = player.getVehicle();
-                  if (!(vehicle instanceof BoatEntity)) {
-                      inBoat = false;
-                      return;
-                  }
-
-                  // The anchor is the boat's own yaw, snapped to the byte lattice it is
-                  // transmitted on. Read fresh every frame, so a boat that drifts or gets
-                  // bumped cannot leave a stale anchor behind.
-                  anchor = Math.round(vehicle.yaw / BOAT_YAW_STEP) * BOAT_YAW_STEP;
-                  inBoat = true;
-              }
-
-              public static boolean inBoat() {
-                  return inBoat;
-              }
-
-              public static double anchor() {
-                  return anchor;
-              }
-
-              /** Angle step produced by one unit of mouse movement, in degrees. */
-              public static double step(MinecraftClient client) {
-                  double sensitivity = client.options.mouseSensitivity;
-                  double multiplier = (sensitivity * 0.6D) + 0.2D;
-                  return multiplier * multiplier * multiplier * 8.0D * 0.15D;
-              }
-
-              /** The nearest angle on the lattice to the given yaw. */
-              public static double snap(double yaw, MinecraftClient client) {
-                  double increment = step(client);
-                  if (increment <= 0.0D) {
-                      return yaw;
-                  }
-                  return anchor + (Math.round((yaw - anchor) / increment) * increment);
-              }
-
-              /** How far the yaw sits from the nearest lattice point, in degrees. */
-              public static double misalignment(double yaw, MinecraftClient client) {
-                  return Math.abs(yaw - snap(yaw, client));
-              }
-
-              /**
-               * True when the reading is close enough to a lattice point that the anchor
-               * can be believed.
-               */
-              public static boolean isAligned(double yaw, MinecraftClient client) {
-                  if (!inBoat) {
-                      return false;
-                  }
-                  double increment = step(client);
-                  if (increment <= 0.0D) {
-                      return false;
-                  }
-                  return misalignment(yaw, client) <= (increment * ALIGNMENT_TOLERANCE);
               }
           }
           SFEOF
@@ -525,6 +403,97 @@ jobs:
           }
           SFEOF
           mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/PixelPerfect.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import net.minecraft.client.MinecraftClient;
+
+          /**
+           * Pixel-perfect measuring: the corrections a serious runner applies to an eye
+           * angle, ported from Ninjabrain Bot 1.5.2 (GPL-3.0).
+           *
+           * The problem this solves. Your yaw moves in whole steps, so even a perfect aim
+           * leaves the crosshair sitting up to half a step away from the eye. No amount of
+           * mouse movement closes that gap - the angle you want is simply not reachable.
+           * The fix is to aim as close as you can, count how many PIXELS the crosshair
+           * sits from the eye, and shift the recorded angle by exactly that many pixels
+           * worth of degrees.
+           *
+           * One pixel is worth
+           *
+           *   atan(2 * tan(halfFov) / screenHeight) / cos(pitch)
+           *
+           * degrees, where halfFov is 15 degrees. That 15 is half of FOV 30, which is why
+           * FOV 30 is the standard measuring FOV and why the M key sets it - the formula
+           * is only right at that FOV. Dividing by cos(pitch) converts a vertical pixel
+           * into the horizontal angle error it represents when looking downward.
+           *
+           * Two other corrections a runner relies on:
+           *
+           * PACKET ROUNDING. Entity movement packets round positions, which biases the
+           * measured angle by up to 0.0008 degrees in a pattern that repeats every 360
+           * degrees. Negligible at hand-aimed precision, real once you are pixel-perfect.
+           *
+           * BLOCK CORNERS. Standing so that both coordinates end in .3 or .7 puts you
+           * exactly on a block corner, where the position is known precisely and the
+           * position term of the calculation drops to zero.
+           */
+          public final class PixelPerfect {
+
+              /** Half of FOV 30, the measuring FOV the pixel formula assumes. */
+              private static final double HALF_FOV_DEGREES = 15.0D;
+
+              /** The FOV the pixel maths is valid at. */
+              public static final double MEASURING_FOV = 30.0D;
+
+              /** Fallback adjustment when not using pixel mode. */
+              public static final double SUBPIXEL_DEGREES = 0.01D;
+
+              private PixelPerfect() {
+              }
+
+              /** Degrees of yaw represented by one screen pixel at the given pitch. */
+              public static double degreesPerPixel(MinecraftClient client, double pitchDegrees) {
+                  // The real framebuffer height, not getScaledHeight(): that one is in GUI
+                  // coordinates and is halved at GUI scale 2, which would make every
+                  // adjustment twice as large as a screen pixel.
+                  int height = client.getWindow().getHeight();
+                  if (height <= 0) {
+                      return SUBPIXEL_DEGREES;
+                  }
+
+                  double toRadians = Math.PI / 180.0D;
+                  double vertical = Math.atan(2.0D * Math.tan(HALF_FOV_DEGREES * toRadians) / height);
+                  double horizontal = vertical / Math.cos(pitchDegrees * toRadians);
+                  return horizontal / toRadians;
+              }
+
+              /** True when the FOV is right for the pixel formula to be valid. */
+              public static boolean atMeasuringFov(MinecraftClient client) {
+                  return Math.abs(client.options.fov - MEASURING_FOV) < 0.5D;
+              }
+
+              /**
+               * Bias from rounding in client-bound move entity packets. Subtracted from a
+               * measured angle to recover the true one.
+               */
+              public static double packetRoundingCorrection(double yawDegrees) {
+                  return 0.000824D * Math.sin((yawDegrees + 45.0D) * Math.PI / 180.0D);
+              }
+
+              /** True when a coordinate sits exactly on a block corner. */
+              public static boolean isOnCorner(double coordinate) {
+                  double fraction = coordinate - Math.floor(coordinate);
+                  return Math.abs(fraction - 0.3D) < 0.0001D || Math.abs(fraction - 0.7D) < 0.0001D;
+              }
+
+              /** True when both coordinates are on a corner, so the position is exact. */
+              public static boolean isOnCorner(double x, double z) {
+                  return isOnCorner(x) && isOnCorner(z);
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
           cat > src/main/java/com/adamarmanyos/stronghold/StrongholdConfig.java <<'SFEOF'
           package com.adamarmanyos.stronghold;
 
@@ -592,11 +561,17 @@ jobs:
                */
               private static boolean trackEyeFlight;
 
-              /** Snap measured angles onto the boat lattice when riding a boat. */
-              private static boolean boatMeasurement = true;
+              /**
+               * Boat eye: pixel-perfect measuring. Throws are recorded with the tighter
+               * standard deviation that the technique earns.
+               */
+              private static boolean boatEye = true;
 
-              /** Show the live boat readout, for learning the technique. */
-              private static boolean boatTrainer;
+              /** Standard deviation assumed for a boat-eye throw, in thousandths of a degree. */
+              private static int boatEyeSigmaThousandths = 10;
+
+              /** Show the live measuring readout, for learning pixel-perfect technique. */
+              private static boolean measuringTrainer;
 
               /**
                * Running calibration data: the sum of squared angle errors and how many
@@ -686,28 +661,34 @@ jobs:
                   save();
               }
 
-              public static boolean boatMeasurement() {
+              public static boolean boatEye() {
                   ensureLoaded();
-                  return boatMeasurement;
+                  return boatEye;
               }
 
-              public static void setBoatMeasurement(boolean value) {
+              public static void setBoatEye(boolean value) {
                   ensureLoaded();
-                  if (value != boatMeasurement) {
-                      boatMeasurement = value;
+                  if (value != boatEye) {
+                      boatEye = value;
                       save();
                   }
               }
 
-              public static boolean boatTrainer() {
+              /** Boat-eye standard deviation in degrees. */
+              public static double boatEyeSigma() {
                   ensureLoaded();
-                  return boatTrainer;
+                  return boatEyeSigmaThousandths / 1000.0D;
               }
 
-              public static void setBoatTrainer(boolean value) {
+              public static boolean measuringTrainer() {
                   ensureLoaded();
-                  if (value != boatTrainer) {
-                      boatTrainer = value;
+                  return measuringTrainer;
+              }
+
+              public static void setMeasuringTrainer(boolean value) {
+                  ensureLoaded();
+                  if (value != measuringTrainer) {
+                      measuringTrainer = value;
                       save();
                   }
               }
@@ -863,9 +844,11 @@ jobs:
                               } else if ("trackeye".equals(key)) {
                                   trackEyeFlight = "true".equalsIgnoreCase(value);
                               } else if ("boat".equals(key)) {
-                                  boatMeasurement = "true".equalsIgnoreCase(value);
-                              } else if ("boattrainer".equals(key)) {
-                                  boatTrainer = "true".equalsIgnoreCase(value);
+                                  boatEye = "true".equalsIgnoreCase(value);
+                              } else if ("boatsigma".equals(key)) {
+                                  boatEyeSigmaThousandths = Integer.parseInt(value);
+                              } else if ("trainer".equals(key)) {
+                                  measuringTrainer = "true".equalsIgnoreCase(value);
                               } else if ("calib_sumsq".equals(key)) {
                                   calibrationSumOfSquares = Double.parseDouble(value);
                               } else if ("calib_n".equals(key)) {
@@ -884,8 +867,9 @@ jobs:
                       trackEyeFlight = false;
                       calibrationSumOfSquares = 0.0D;
                       calibrationThrows = 0;
-                      boatMeasurement = true;
-                      boatTrainer = false;
+                      boatEye = true;
+                      boatEyeSigmaThousandths = 10;
+                      measuringTrainer = false;
                   }
               }
 
@@ -906,9 +890,11 @@ jobs:
                           writer.newLine();
                           writer.write("trackeye=" + trackEyeFlight);
                           writer.newLine();
-                          writer.write("boat=" + boatMeasurement);
+                          writer.write("boat=" + boatEye);
                           writer.newLine();
-                          writer.write("boattrainer=" + boatTrainer);
+                          writer.write("boatsigma=" + boatEyeSigmaThousandths);
+                          writer.newLine();
+                          writer.write("trainer=" + measuringTrainer);
                           writer.newLine();
                           writer.write("calib_sumsq=" + calibrationSumOfSquares);
                           writer.newLine();
@@ -1027,6 +1013,11 @@ jobs:
               private static final int KEY_CALIBRATE = GLFW.GLFW_KEY_K;
               private static final int KEY_TELEPORT = GLFW.GLFW_KEY_P;
 
+              // Arrow keys: unbound in vanilla, and the natural direction mapping for
+              // "my crosshair is a few pixels to the left of the eye".
+              private static final int KEY_PIXEL_MINUS = GLFW.GLFW_KEY_LEFT;
+              private static final int KEY_PIXEL_PLUS = GLFW.GLFW_KEY_RIGHT;
+
               // Measuring view: narrow FOV and the slowest mouse, so a pixel of movement
               // covers the least angle and the crosshair can be put exactly on the eye.
               // This is the legal substitute for a zoom mod - both are vanilla settings.
@@ -1125,7 +1116,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v5.0.0";
+              private static final String VERSION = "v6.0.0";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -1134,7 +1125,7 @@ jobs:
               private static List<StrongholdPrediction> results;
               private static String advice;
 
-              /** Trainer feedback: how far the last boat throw was from the truth. */
+              /** Trainer feedback: how far the last throw was from the eye's true bearing. */
               private static String boatScore;
 
               private static boolean hidden;
@@ -1149,6 +1140,8 @@ jobs:
               private static boolean prevMeasureMode;
               private static boolean prevCalibrate;
               private static boolean prevTeleport;
+              private static boolean prevPixelMinus;
+              private static boolean prevPixelPlus;
               private static boolean prevReset;
               private static boolean prevFade;
               private static boolean prevBrighten;
@@ -1165,7 +1158,6 @@ jobs:
                   }
 
                   EyeTracker.tick(client);
-                  BoatMeasurement.tick(client);
                   BlindPractice.tick(client);
                   pollKeys(client);
 
@@ -1208,6 +1200,8 @@ jobs:
                       prevMeasureMode = false;
                       prevCalibrate = false;
                       prevTeleport = false;
+                      prevPixelMinus = false;
+                      prevPixelPlus = false;
                       prevReset = false;
                       prevFade = false;
                       prevBrighten = false;
@@ -1225,6 +1219,8 @@ jobs:
                   boolean measureMode = !modifier && InputUtil.isKeyPressed(window, KEY_MEASURE_MODE);
                   boolean calibrate = !modifier && InputUtil.isKeyPressed(window, KEY_CALIBRATE);
                   boolean teleport = !modifier && InputUtil.isKeyPressed(window, KEY_TELEPORT);
+                  boolean pixelMinus = !modifier && InputUtil.isKeyPressed(window, KEY_PIXEL_MINUS);
+                  boolean pixelPlus = !modifier && InputUtil.isKeyPressed(window, KEY_PIXEL_PLUS);
                   boolean reset = !modifier && InputUtil.isKeyPressed(window, KEY_RESET);
                   boolean fade = !modifier && InputUtil.isKeyPressed(window, KEY_FADE);
                   boolean brighten = !modifier && InputUtil.isKeyPressed(window, KEY_BRIGHTEN);
@@ -1252,6 +1248,12 @@ jobs:
                   if (teleport && !prevTeleport) {
                       teleportToPrediction(client.player);
                   }
+                  if (pixelMinus && !prevPixelMinus) {
+                      adjustLastAngle(client, -1);
+                  }
+                  if (pixelPlus && !prevPixelPlus) {
+                      adjustLastAngle(client, 1);
+                  }
                   if (reset && !prevReset) {
                       reset();
                   }
@@ -1275,6 +1277,8 @@ jobs:
                   prevMeasureMode = measureMode;
                   prevCalibrate = calibrate;
                   prevTeleport = teleport;
+                  prevPixelMinus = pixelMinus;
+                  prevPixelPlus = pixelPlus;
                   prevReset = reset;
                   prevFade = fade;
                   prevBrighten = brighten;
@@ -1317,6 +1321,34 @@ jobs:
 
                   // Persist, so the setting survives a restart like any options change.
                   options.write();
+              }
+
+              /**
+               * Shifts the most recent throw's angle by one pixel.
+               *
+               * Your yaw moves in whole steps, so a perfect aim still leaves the crosshair
+               * up to half a step from the eye and no mouse movement can close the gap -
+               * the angle you want is not reachable. Counting the pixels the crosshair
+               * sits from the eye and correcting by that many is how the gap is closed.
+               *
+               * If the crosshair is too far left, use the + adjustment, and vice versa.
+               */
+              private static void adjustLastAngle(MinecraftClient client, int increments) {
+                  if (MEASUREMENTS.isEmpty()) {
+                      showNotice("No throw to adjust");
+                      return;
+                  }
+
+                  EyeMeasurement last = MEASUREMENTS.get(MEASUREMENTS.size() - 1);
+                  double perPixel = PixelPerfect.degreesPerPixel(client, last.pitch);
+
+                  last.yaw = (float) (last.yaw + (increments * perPixel));
+                  last.pixelAdjustments += increments;
+
+                  showNotice("Angle " + (last.pixelAdjustments >= 0 ? "+" : "")
+                      + last.pixelAdjustments + " px (" + decimals(perPixel * last.pixelAdjustments, 4) + " deg)");
+
+                  calculate();
               }
 
               /**
@@ -1421,15 +1453,16 @@ jobs:
                           (float) EyeTracker.bearingDegrees(),
                           EyeTracker.TRACKED_SIGMA,
                           true);
-                  } else if (StrongholdConfig.boatMeasurement()
-                      && BoatMeasurement.isAligned(player.yaw, client)) {
-                      // Riding a boat and sitting on the angle lattice: the reading can be
-                      // snapped to the exact angle the game produced.
+                  } else if (StrongholdConfig.boatEye()) {
+                      // Boat eye: a pixel-perfect measurement. The angle is the one you
+                      // aimed, corrected for packet rounding, and then nudged onto the eye
+                      // with the arrow keys. Precision comes from that correction, so the
+                      // throw is recorded with the boat-eye standard deviation.
                       measurement = new EyeMeasurement(
                           player.getX(),
                           player.getZ(),
-                          (float) BoatMeasurement.snap(player.yaw, client),
-                          BoatMeasurement.BOAT_SIGMA,
+                          (float) (player.yaw - PixelPerfect.packetRoundingCorrection(player.yaw)),
+                          StrongholdConfig.boatEyeSigma(),
                           false);
                       measurement.fromBoat = true;
                   } else {
@@ -1440,10 +1473,14 @@ jobs:
                       measurement = new EyeMeasurement(
                           player.getX(),
                           player.getZ(),
-                          player.yaw,
+                          (float) (player.yaw - PixelPerfect.packetRoundingCorrection(player.yaw)),
                           StrongholdConfig.angleSigma(),
                           false);
                   }
+
+                  // Pitch decides what a pixel is worth: looking further down, one pixel
+                  // of screen covers more yaw.
+                  measurement.pitch = player.pitch;
 
                   // Read the flight distance before marking the eye done, not after.
                   String detail = measurement.fromEyeFlight
@@ -1454,7 +1491,7 @@ jobs:
                   // tracker holds that bearing whether or not eye measuring is switched
                   // on - so a boat throw can be graded the instant it is taken, without
                   // walking to the stronghold to find out.
-                  if (StrongholdConfig.boatTrainer() && EyeTracker.hasBearing()) {
+                  if (StrongholdConfig.measuringTrainer() && EyeTracker.hasBearing()) {
                       double error = wrapYaw(measurement.yaw - EyeTracker.bearingDegrees());
                       boatScore = "Last throw off by " + decimals(Math.abs(error), 4) + " deg";
                   }
@@ -1582,8 +1619,15 @@ jobs:
                   if (advice != null && MEASUREMENTS.size() < 2) {
                       height += (ROW_HEIGHT * adviceLineCount()) + 2;
                   }
-                  if (StrongholdConfig.boatTrainer() && BoatMeasurement.inBoat()) {
-                      height += (ROW_HEIGHT * (boatScore == null ? 3 : 4)) + 2;
+                  if (StrongholdConfig.measuringTrainer()) {
+                      int lines = 2;
+                      if (!MEASUREMENTS.isEmpty()) {
+                          lines++;
+                      }
+                      if (boatScore != null) {
+                          lines++;
+                      }
+                      height += (ROW_HEIGHT * lines) + 2;
                   }
                   if (StrongholdConfig.trackEyeFlight() && EyeTracker.isReady()) {
                       height += ROW_HEIGHT + 2;
@@ -1717,45 +1761,39 @@ jobs:
                       }
                   }
 
-                  if (StrongholdConfig.boatTrainer() && BoatMeasurement.inBoat()) {
+                  if (StrongholdConfig.measuringTrainer()) {
                       y += 2;
 
-                      double yaw = client.player.yaw;
-                      double snapped = BoatMeasurement.snap(yaw, client);
-                      double off = BoatMeasurement.misalignment(yaw, client);
-                      double step = BoatMeasurement.step(client);
-                      boolean aligned = BoatMeasurement.isAligned(yaw, client);
+                      boolean fovOk = PixelPerfect.atMeasuringFov(client);
+                      double perPixel = PixelPerfect.degreesPerPixel(client, client.player.pitch);
+                      boolean corner = PixelPerfect.isOnCorner(client.player.getX(), client.player.getZ());
 
                       text(client, matrices,
-                          "Boat " + decimals(wrapYaw(BoatMeasurement.anchor()), 4)
-                              + "   step " + decimals(step, 4),
-                          left + PADDING, y, COLOR_HEADER);
+                          "FOV " + Math.round(client.options.fov)
+                              + (fovOk ? " ok" : " - press M, pixel maths needs 30")
+                              + "   " + decimals(perPixel, 4) + " deg/px",
+                          left + PADDING, y, fovOk ? COLOR_HEADER : COLOR_LOW);
                       y += ROW_HEIGHT;
 
                       text(client, matrices,
-                          "Yaw " + decimals(wrapYaw(yaw), 3) + " -> " + decimals(wrapYaw(snapped), 3)
-                              + "  off " + decimals(off, 4),
-                          left + PADDING, y, aligned ? COLOR_HIGH : COLOR_LOW);
+                          corner ? "On a block corner - position is exact"
+                              : "Not on a corner - stand against a block",
+                          left + PADDING, y, corner ? COLOR_HIGH : COLOR_MEDIUM);
                       y += ROW_HEIGHT;
 
-                      text(client, matrices,
-                          aligned ? "On lattice - throws snap exactly"
-                              : "Off lattice - re-aim by turning the boat",
-                          left + PADDING, y, aligned ? COLOR_HIGH : COLOR_LOW);
-                      y += ROW_HEIGHT;
+                      if (!MEASUREMENTS.isEmpty()) {
+                          EyeMeasurement last = MEASUREMENTS.get(MEASUREMENTS.size() - 1);
+                          text(client, matrices,
+                              "Last throw " + (last.pixelAdjustments >= 0 ? "+" : "")
+                                  + last.pixelAdjustments + " px  (arrows adjust)",
+                              left + PADDING, y, COLOR_NUMBER);
+                          y += ROW_HEIGHT;
+                      }
 
                       if (boatScore != null) {
                           text(client, matrices, boatScore, left + PADDING, y, COLOR_NUMBER);
                           y += ROW_HEIGHT;
                       }
-                  }
-
-                  if (StrongholdConfig.trackEyeFlight() && EyeTracker.isReady()) {
-                      y += 2;
-                      text(client, matrices,
-                          "Eye tracked " + decimals(EyeTracker.travelled(), 0) + " blocks - F3+C to add",
-                          left + PADDING, y, COLOR_HIGH);
-                      y += ROW_HEIGHT;
                   }
 
                   String warning = warning();
@@ -1997,7 +2035,7 @@ jobs:
               private int calibrationY;
               private int practiceY;
               private int boatY;
-              private int boatTrainerY;
+              private int trainerRowY;
 
               /** Which slider the mouse is currently dragging, or -1. */
               private int dragging = -1;
@@ -2018,7 +2056,7 @@ jobs:
                   this.calibrationY = this.panelTop + 168;
                   this.practiceY = this.panelTop + 196;
                   this.boatY = this.panelTop + 224;
-                  this.boatTrainerY = this.panelTop + 252;
+                  this.trainerRowY = this.panelTop + 252;
               }
 
               /** Keeps the world rendering behind the screen instead of pausing. */
@@ -2065,11 +2103,11 @@ jobs:
 
                   drawToggle(matrices, "Blind practice", "start (needs cheats)", this.practiceY);
 
-                  drawToggle(matrices, "Boat measuring",
-                      StrongholdConfig.boatMeasurement() ? "on" : "off", this.boatY);
+                  drawToggle(matrices, "Boat eye (pixel perfect)",
+                      StrongholdConfig.boatEye() ? "on" : "off", this.boatY);
 
-                  drawToggle(matrices, "Boat trainer",
-                      StrongholdConfig.boatTrainer() ? "on" : "off", this.boatTrainerY);
+                  drawToggle(matrices, "Measuring trainer",
+                      StrongholdConfig.measuringTrainer() ? "on" : "off", this.trainerRowY);
 
                   centeredText(matrices, "Esc to close", left + (PANEL_WIDTH / 2), bottom - 14, TEXT_DIM);
 
@@ -2231,12 +2269,12 @@ jobs:
                   }
 
                   if (isOnRow(mouseX, mouseY, this.boatY)) {
-                      StrongholdConfig.setBoatMeasurement(!StrongholdConfig.boatMeasurement());
+                      StrongholdConfig.setBoatEye(!StrongholdConfig.boatEye());
                       return true;
                   }
 
-                  if (isOnRow(mouseX, mouseY, this.boatTrainerY)) {
-                      StrongholdConfig.setBoatTrainer(!StrongholdConfig.boatTrainer());
+                  if (isOnRow(mouseX, mouseY, this.trainerRowY)) {
+                      StrongholdConfig.setMeasuringTrainer(!StrongholdConfig.measuringTrainer());
                       return true;
                   }
 
@@ -2303,7 +2341,12 @@ jobs:
 
               public final double x;
               public final double z;
-              public final float yaw;
+              /**
+               * Not final: pixel adjustment shifts a recorded angle after the fact, which
+               * is the whole point of the technique - the angle you want is not reachable
+               * with the mouse, so it is corrected once the throw is already taken.
+               */
+              public float yaw;
 
               /**
                * Assumed standard deviation of THIS measurement's angle, in degrees.
@@ -2319,6 +2362,12 @@ jobs:
 
               /** True when the angle was snapped onto a boat's angle lattice. */
               public boolean fromBoat;
+
+              /** Pitch at the moment of the throw; a pixel is worth more when looking down. */
+              public float pitch;
+
+              /** Net pixel adjustments applied so far, signed. */
+              public int pixelAdjustments;
 
               public EyeMeasurement(double x, double z, float yaw, double sigma, boolean fromEyeFlight) {
                   this.x = x;
