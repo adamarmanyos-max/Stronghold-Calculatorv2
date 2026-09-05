@@ -81,7 +81,7 @@ jobs:
           loader_version=0.14.24
 
           # Mod
-          mod_version=6.0.0
+          mod_version=6.1.0
           maven_group=com.adamarmanyos
           archives_base_name=stronghold-finder
           SFEOF
@@ -570,6 +570,14 @@ jobs:
               /** Standard deviation assumed for a boat-eye throw, in thousandths of a degree. */
               private static int boatEyeSigmaThousandths = 10;
 
+              /**
+               * Tall measuring resolution. 4096 is comfortably past the ~3071 needed for
+               * one pixel to beat the 0.01 degree subpixel step, without asking for a
+               * framebuffer so large that the driver refuses it.
+               */
+              private static int tallWidth = 512;
+              private static int tallHeight = 4096;
+
               /** Show the live measuring readout, for learning pixel-perfect technique. */
               private static boolean measuringTrainer;
 
@@ -678,6 +686,16 @@ jobs:
               public static double boatEyeSigma() {
                   ensureLoaded();
                   return boatEyeSigmaThousandths / 1000.0D;
+              }
+
+              public static int tallWidth() {
+                  ensureLoaded();
+                  return tallWidth;
+              }
+
+              public static int tallHeight() {
+                  ensureLoaded();
+                  return tallHeight;
               }
 
               public static boolean measuringTrainer() {
@@ -845,6 +863,10 @@ jobs:
                                   trackEyeFlight = "true".equalsIgnoreCase(value);
                               } else if ("boat".equals(key)) {
                                   boatEye = "true".equalsIgnoreCase(value);
+                              } else if ("tallwidth".equals(key)) {
+                                  tallWidth = Math.max(160, Integer.parseInt(value));
+                              } else if ("tallheight".equals(key)) {
+                                  tallHeight = Math.max(240, Integer.parseInt(value));
                               } else if ("boatsigma".equals(key)) {
                                   boatEyeSigmaThousandths = Integer.parseInt(value);
                               } else if ("trainer".equals(key)) {
@@ -869,6 +891,8 @@ jobs:
                       calibrationThrows = 0;
                       boatEye = true;
                       boatEyeSigmaThousandths = 10;
+                      tallWidth = 512;
+                      tallHeight = 4096;
                       measuringTrainer = false;
                   }
               }
@@ -893,6 +917,10 @@ jobs:
                           writer.write("boat=" + boatEye);
                           writer.newLine();
                           writer.write("boatsigma=" + boatEyeSigmaThousandths);
+                          writer.newLine();
+                          writer.write("tallwidth=" + tallWidth);
+                          writer.newLine();
+                          writer.write("tallheight=" + tallHeight);
                           writer.newLine();
                           writer.write("trainer=" + measuringTrainer);
                           writer.newLine();
@@ -1015,6 +1043,7 @@ jobs:
 
               // Arrow keys: unbound in vanilla, and the natural direction mapping for
               // "my crosshair is a few pixels to the left of the eye".
+              private static final int KEY_TALL_SCREEN = GLFW.GLFW_KEY_UP;
               private static final int KEY_PIXEL_MINUS = GLFW.GLFW_KEY_LEFT;
               private static final int KEY_PIXEL_PLUS = GLFW.GLFW_KEY_RIGHT;
 
@@ -1116,7 +1145,7 @@ jobs:
               private static final long NOTICE_DURATION_MS = 3000L;
               private static final int MAX_MEASUREMENTS = 3;
 
-              private static final String VERSION = "v6.0.0";
+              private static final String VERSION = "v6.1.0";
 
               private static final StrongholdCalculator CALCULATOR = new NinjabrainChunkCalculator();
 
@@ -1140,6 +1169,7 @@ jobs:
               private static boolean prevMeasureMode;
               private static boolean prevCalibrate;
               private static boolean prevTeleport;
+              private static boolean prevTallScreen;
               private static boolean prevPixelMinus;
               private static boolean prevPixelPlus;
               private static boolean prevReset;
@@ -1200,6 +1230,7 @@ jobs:
                       prevMeasureMode = false;
                       prevCalibrate = false;
                       prevTeleport = false;
+                      prevTallScreen = false;
                       prevPixelMinus = false;
                       prevPixelPlus = false;
                       prevReset = false;
@@ -1219,6 +1250,7 @@ jobs:
                   boolean measureMode = !modifier && InputUtil.isKeyPressed(window, KEY_MEASURE_MODE);
                   boolean calibrate = !modifier && InputUtil.isKeyPressed(window, KEY_CALIBRATE);
                   boolean teleport = !modifier && InputUtil.isKeyPressed(window, KEY_TELEPORT);
+                  boolean tallScreen = !modifier && InputUtil.isKeyPressed(window, KEY_TALL_SCREEN);
                   boolean pixelMinus = !modifier && InputUtil.isKeyPressed(window, KEY_PIXEL_MINUS);
                   boolean pixelPlus = !modifier && InputUtil.isKeyPressed(window, KEY_PIXEL_PLUS);
                   boolean reset = !modifier && InputUtil.isKeyPressed(window, KEY_RESET);
@@ -1247,6 +1279,9 @@ jobs:
                   }
                   if (teleport && !prevTeleport) {
                       teleportToPrediction(client.player);
+                  }
+                  if (tallScreen && !prevTallScreen) {
+                      TallScreen.toggle(client);
                   }
                   if (pixelMinus && !prevPixelMinus) {
                       adjustLastAngle(client, -1);
@@ -1277,6 +1312,7 @@ jobs:
                   prevMeasureMode = measureMode;
                   prevCalibrate = calibrate;
                   prevTeleport = teleport;
+                  prevTallScreen = tallScreen;
                   prevPixelMinus = pixelMinus;
                   prevPixelPlus = pixelPlus;
                   prevReset = reset;
@@ -1620,7 +1656,7 @@ jobs:
                       height += (ROW_HEIGHT * adviceLineCount()) + 2;
                   }
                   if (StrongholdConfig.measuringTrainer()) {
-                      int lines = 2;
+                      int lines = 3;
                       if (!MEASUREMENTS.isEmpty()) {
                           lines++;
                       }
@@ -1773,6 +1809,14 @@ jobs:
                               + (fovOk ? " ok" : " - press M, pixel maths needs 30")
                               + "   " + decimals(perPixel, 4) + " deg/px",
                           left + PADDING, y, fovOk ? COLOR_HEADER : COLOR_LOW);
+                      y += ROW_HEIGHT;
+
+                      int screenHeight = client.getWindow().getHeight();
+                      boolean tallEnough = screenHeight >= TallScreen.USEFUL_HEIGHT;
+                      text(client, matrices,
+                          "Screen " + client.getWindow().getWidth() + "x" + screenHeight
+                              + (tallEnough ? "  pixel beats 0.01" : "  too short (up arrow)"),
+                          left + PADDING, y, tallEnough ? COLOR_HIGH : COLOR_MEDIUM);
                       y += ROW_HEIGHT;
 
                       text(client, matrices,
@@ -2324,6 +2368,97 @@ jobs:
                   } else {
                       applySigma(fraction);
                   }
+              }
+          }
+          SFEOF
+          mkdir -p src/main/java/com/adamarmanyos/stronghold
+          cat > src/main/java/com/adamarmanyos/stronghold/TallScreen.java <<'SFEOF'
+          package com.adamarmanyos.stronghold;
+
+          import net.minecraft.client.MinecraftClient;
+
+          import org.lwjgl.glfw.GLFW;
+
+          /**
+           * Tall measuring resolution.
+           *
+           * One screen pixel is worth atan(2 * tan(15 deg) / height) degrees of yaw, so
+           * the taller the framebuffer, the finer a single pixel adjustment becomes:
+           *
+           *    720 px   0.0427 deg per pixel
+           *   1080 px   0.0284
+           *   2160 px   0.0142
+           *   4096 px   0.0075
+           *  16384 px   0.0019
+           *
+           * Below about 3071 pixels of height, one pixel is worth more than the 0.01
+           * degree subpixel step and pixel counting gains nothing. Above it, pixel
+           * adjustment becomes the finer tool - which is the whole reason runners stretch
+           * the window before measuring.
+           *
+           * This resizes the game window through GLFW and remembers the previous size so
+           * it can be put back. Nothing else in the mod needs to change: the pixel maths
+           * already reads the live framebuffer height, so the adjustment step follows the
+           * window automatically.
+           *
+           * UNVERIFIED: whether a given system will honour a window taller than the
+           * monitor is down to the OS and window manager, and I have not been able to test
+           * it. If the height gets clamped, the trainer's degrees-per-pixel readout will
+           * show what you actually got rather than what was asked for.
+           */
+          public final class TallScreen {
+
+              /** Height at which one pixel becomes finer than the 0.01 degree step. */
+              public static final int USEFUL_HEIGHT = 3071;
+
+              private static boolean tall;
+              private static int previousWidth;
+              private static int previousHeight;
+
+              private TallScreen() {
+              }
+
+              public static boolean isTall() {
+                  return tall;
+              }
+
+              /** Switches into the tall measuring resolution, or back again. */
+              public static void toggle(MinecraftClient client) {
+                  if (client.options.fullscreen) {
+                      StrongholdOverlay.notice("Leave fullscreen first");
+                      return;
+                  }
+
+                  long handle = client.getWindow().getHandle();
+
+                  if (tall) {
+                      GLFW.glfwSetWindowSize(handle, previousWidth, previousHeight);
+                      tall = false;
+                      StrongholdOverlay.notice("Screen restored");
+                      return;
+                  }
+
+                  previousWidth = client.getWindow().getWidth();
+                  previousHeight = client.getWindow().getHeight();
+
+                  GLFW.glfwSetWindowSize(handle,
+                      StrongholdConfig.tallWidth(), StrongholdConfig.tallHeight());
+                  tall = true;
+
+                  StrongholdOverlay.notice("Tall screen "
+                      + StrongholdConfig.tallWidth() + "x" + StrongholdConfig.tallHeight());
+              }
+
+              /**
+               * Restores the window if the game is closing or the player leaves the world
+               * while still stretched, so a tall window is never left behind.
+               */
+              public static void restoreIfNeeded(MinecraftClient client) {
+                  if (!tall) {
+                      return;
+                  }
+                  GLFW.glfwSetWindowSize(client.getWindow().getHandle(), previousWidth, previousHeight);
+                  tall = false;
               }
           }
           SFEOF
